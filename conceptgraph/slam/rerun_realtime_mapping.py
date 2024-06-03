@@ -171,7 +171,8 @@ def main(cfg : DictConfig):
 
         ## Initialize the detection models
         detection_model = measure_time(YOLO)('yolov8l-world.pt')
-        sam_predictor = SAM('sam_l.pt') # SAM('mobile_sam.pt') # UltraLytics SAM
+        # sam_predictor = SAM('sam_l.pt') # SAM('mobile_sam.pt') # UltraLytics SAM
+        sam_predictor = SAM('mobile_sam.pt') # UltraLytics SAM
         # sam_predictor = measure_time(get_sam_predictor)(cfg) # Normal SAM
         clip_model, _, clip_preprocess = open_clip.create_model_and_transforms(
             "ViT-H-14", "laion2b_s32b_b79k"
@@ -266,7 +267,9 @@ def main(cfg : DictConfig):
             )
             
             # Make the edges
-            labels, edges, edge_image = make_vlm_edges(image, curr_det, obj_classes, detection_class_labels, det_exp_vis_path, color_path, cfg.make_edges, openai_client)
+            # labels, edges, edge_image = make_vlm_edges(image, curr_det, obj_classes, detection_class_labels, det_exp_vis_path, color_path, cfg.make_edges, openai_client)
+            labels, edges, edge_image = make_vlm_edges(image, curr_det, obj_classes, detection_class_labels, det_exp_vis_path, color_path, False, None)
+
             
             image_crops, image_feats, text_feats = compute_clip_features_batched(
                 image_rgb, curr_det, clip_model, clip_preprocess, clip_tokenizer, obj_classes.get_classes_arr(), cfg.device)

@@ -1,3 +1,4 @@
 # Main paths
-repo_root: /home/kuwajerw/repos/new_conceptgraphs/concept-graphs
-data_root: /home/kuwajerw/new_local_data
+
+repo_root: /home/lior/Mentee/concept-graphs
+data_root: /home/lior/Mentee/Datasets/
