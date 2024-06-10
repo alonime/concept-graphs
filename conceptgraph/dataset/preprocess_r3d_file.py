@@ -22,7 +22,7 @@ from pathlib import Path
 
 @dataclass
 class ProgramArgs:
-    datapath = "/home/lior/Mentee/Datasets/record3d/office/office2"
+    datapath = "/home/liora/Lior/Datasets/record3d/workshop_smooth_depth"
     output_dir = None  # Optional, set dynamically if not provided
 
 desired_width = 1440

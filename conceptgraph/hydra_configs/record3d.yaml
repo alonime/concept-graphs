@@ -2,6 +2,6 @@ defaults:
   - base_paths
   
 dataset_root: ${data_root}/record3d
-scene_id: office1_preprocessed
+scene_id: workshop_smooth_depth_preprocessed
 dataset_config: ${dataset_root}/${scene_id}/dataconfig.yaml
 render_camera_path: ${repo_root}/conceptgraph/dataset/dataconfigs/record3d/record_3d_camera.json
