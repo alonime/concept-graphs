@@ -10,6 +10,7 @@ import gzip
 import dataclasses
 from typing import Literal
 import logging
+import datetime
 
 # Third-party imports
 import cv2
@@ -25,6 +26,8 @@ import open_clip
 from ultralytics import YOLO, SAM
 import supervision as sv
 
+from openai import OpenAI
+
 # Local application/library specific imports
 from conceptgraph.utils.optional_rerun_wrapper import (
     OptionalReRun, 
@@ -39,7 +42,7 @@ from conceptgraph.utils.optional_rerun_wrapper import (
 from conceptgraph.utils.optional_wandb_wrapper import OptionalWandB
 from conceptgraph.utils.geometry import rotation_matrix_to_quaternion
 from conceptgraph.utils.logging_metrics import DenoisingTracker, MappingTracker
-from conceptgraph.utils.vlm import get_obj_rel_from_image_gpt4v, get_openai_client
+from conceptgraph.utils.vlm import get_obj_rel_from_image_gpt4v
 from conceptgraph.utils.ious import mask_subtract_contained
 from conceptgraph.utils.general_utils import (
     ObjectClasses, 
@@ -114,6 +117,7 @@ class SceneGraphConfigs:
 
     classes_file = "/conceptgraph/scannet200_classes.txt"
     bg_classes = ["wall", "floor", "ceiling"]
+    render_camera_path: str = "/conceptgraph/dataset/dataconfigs/record3d/record_3d_camera.json"
     skip_bg: bool = False
 
 
@@ -131,6 +135,7 @@ class SceneGraph:
         self.configs = SceneGraphConfigs()
 
         self.tracker = MappingTracker()
+        self.viz = None
         if self.configs.build_visualization == 'rerun':
             self.viz = OptionalReRun()
             self.viz.set_use_rerun(True)
@@ -146,7 +151,11 @@ class SceneGraph:
         self.obj_classes =  ObjectClasses(classes_file_path=self.configs.classes_file, 
                                           bg_classes=self.configs.bg_classes, 
                                           skip_bg=self.configs.skip_bg)
-    
+
+        self.detection_model, self.segmentaion_model = None, None
+        self.clip_model, self.clip_preprocess, self.clip_tokenizer = None, None, None
+
+
     def init_dataset(self,):
          # Initialize the dataset
         self.dataset = get_dataset(dataconfig=self.configs.dataset_config,
@@ -161,50 +170,60 @@ class SceneGraph:
                                 dtype=torch.float)
         
     def init_models(self,):
-        logging.info("Iinitazlize models")
+        logging.info("Iinitazlize models:")
         logging.info(f"Detectoin Model: {self.configs.detectoin_model}")
-        detection_model = YOLO(self.configs.detectoin_model)
-        # sam_predictor = SAM('sam_l.pt') # SAM('mobile_sam.pt') # UltraLytics SAM
-        sam_predictor = SAM('mobile_sam.pt') # UltraLytics SAM
-        # sam_predictor = measure_time(get_sam_predictor)(cfg) # Normal SAM
-        clip_model, _, clip_preprocess = open_clip.create_model_and_transforms(self.configs.clip_name, 
+        self.detection_model = YOLO(self.configs.detectoin_model)
+        self.detection_model.set_classes(self.obj_classes.get_classes_arr())
+
+        logging.info(f"Segmentaion Model: {self.configs.detectoin_model}")
+        # segmentaion_model = SAM('sam_l.pt') # SAM('mobile_sam.pt') # UltraLytics SAM
+        self.segmentaion_model = SAM('mobile_sam.pt') # UltraLytics SAM
+        # segmentaion_model = measure_time(get_segmentaion_model)(cfg) # Normal SAM
+        
+        logging.info(f"CLIP Model: {self.configs.clip_name} | Pretrained Weights: {self.configs.clip_pretrained}")
+        self.clip_model, _, self.clip_preprocess = open_clip.create_model_and_transforms(self.configs.clip_name, 
                                                                                self.configs.clip_pretrained)
-        clip_model = clip_model.to(self.configs.device)
-        clip_tokenizer = open_clip.get_tokenizer(self.configs.clip_name)
-
-        # Set the classes for the detection model
-        detection_model.set_classes(obj_classes.get_classes_arr())
-
-        openai_client = get_openai_client()
+        self.clip_model = self.clip_model.to(self.configs.device)
+        self.clip_tokenizer = open_clip.get_tokenizer(self.configs.clip_name)
+        
+        assert os.getenv('OPENAI_API_KEY'), "OpenAI API key is required is the environment variables, and it don't exsit"
+        logging.info("OpenAI clinet: GPT-4 LLM")
+        self.openai_client =  OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
 
 
     def build_scene(self):
-        det_exp_path.mkdir(parents=True, exist_ok=True)
+        results_dir =  Path(self.configs.dataset_root) / self.configs.datasetscene_id / "exps" / datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        results_dir.mkdir(exist_ok=True, parents=True)
+        logging.info(f"Save results in {results_dir}")
+
+        objects = MapObjectList(device=self.configs.device)
+        map_edges = MapEdgeMapping(objects)
+
+        # For visualization
+        if self.viz is not None:
+            view_param = read_pinhole_camera_parameters(cfg.render_camera_path)
+            obj_renderer = OnlineObjectRenderer(
+                view_param = view_param,
+                base_objects = None, 
+                gray_map = False,
+            )
+            frames = []
 
         
 
 if __name__ == "__main__":
     scene_graph = SceneGraph()
     scene_graph.init_dataset()
+    scene_graph.init_models()
 
 
 
 def main(cfg : DictConfig):
 
-   
-
     objects = MapObjectList(device=cfg.device)
     map_edges = MapEdgeMapping(objects)
 
-    # For visualization
-    if cfg.vis_render:
-        view_param = read_pinhole_camera_parameters(cfg.render_camera_path)
-        obj_renderer = OnlineObjectRenderer(
-            view_param = view_param,
-            base_objects = None, 
-            gray_map = False,
-        )
-        frames = []
+
     # output folder for this mapping experiment
     exp_out_path = get_exp_out_path(cfg.dataset_root, cfg.scene_id, cfg.exp_suffix)
 
@@ -226,11 +245,6 @@ def main(cfg : DictConfig):
     
     prev_adjusted_pose = None
 
-    if run_detections:
-
-        
-    else:
-        print("\n".join(["NOT Running detections..."] * 10))
 
     save_hydra_config(cfg, exp_out_path)
     save_hydra_config(detections_exp_cfg, exp_out_path, is_detection_config=True)
@@ -295,7 +309,7 @@ def main(cfg : DictConfig):
             # Get Masks Using SAM or MobileSAM
             # UltraLytics SAM
             if xyxy_tensor.numel() != 0:
-                sam_out = sam_predictor.predict(color_path, bboxes=xyxy_tensor, verbose=False)
+                sam_out = segmentaion_model.predict(color_path, bboxes=xyxy_tensor, verbose=False)
                 masks_tensor = sam_out[0].masks.data
 
                 masks_np = masks_tensor.cpu().numpy()
