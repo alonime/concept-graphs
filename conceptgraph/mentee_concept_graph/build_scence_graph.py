@@ -7,8 +7,9 @@ import os
 from pathlib import Path
 import pickle
 import gzip
-from dataclasses import dataclass
+import dataclasses
 from typing import Literal
+import logging
 
 # Third-party imports
 import cv2
@@ -99,11 +100,28 @@ from conceptgraph.utils.general_utils import get_vis_out_path, cfg_to_dict, chec
 # Disable torch gradient computation
 torch.set_grad_enabled(False)
 
-@dataclass
+@dataclasses.dataclass
 class SceneGraphConfigs:
+
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+
     wandb: bool = True
     "Log in wand indecator"
     build_visualization: Literal['rerun', 'open3d', 'none'] = 'rerun'
+    dataset_root = Path("/home/liora/Lior/Datasets/record3d")
+    scene_id= "workshop_smooth_depth_preprocessed"
+    dataset_config= "dataconfig.yaml"
+
+    classes_file = "/conceptgraph/scannet200_classes.txt"
+    bg_classes = ["wall", "floor", "ceiling"]
+    skip_bg: bool = False
+
+
+    detectoin_model: str = "yolov8l-world.pt"
+    segmentaion_model: str = "mobile_sam.pt"  # UltraLytics SAM
+    clip_name: str = "ViT-H-14"
+    clip_pretrained: str = "laion2b_s32b_b79k"
+
 
 
 
@@ -119,40 +137,61 @@ class SceneGraph:
             self.viz.init("realtime_mapping")
             self.viz.spawn()
 
+        if self.configs.wandb:
+            self.owandb = OptionalWandB()
+            self.owandb.set_use_wandb(self.configs.wandb)
+            self.owandb.init(project="concept-graphs", config=dataclasses.asdict(self.configs),)
 
+
+        self.obj_classes =  ObjectClasses(classes_file_path=self.configs.classes_file, 
+                                          bg_classes=self.configs.bg_classes, 
+                                          skip_bg=self.configs.skip_bg)
+    
+    def init_dataset(self,):
+         # Initialize the dataset
+        self.dataset = get_dataset(dataconfig=self.configs.dataset_config,
+                                start=self.configs.start,
+                                end=self.configs.end,
+                                stride=self.configs.stride,
+                                basedir=self.configs.dataset_root,
+                                sequence=self.configs.scene_id,
+                                desired_height=self.configs.image_height,
+                                desired_width=self.configs.image_width,
+                                device="cpu",
+                                dtype=torch.float)
+        
+    def init_models(self,):
+        logging.info("Iinitazlize models")
+        logging.info(f"Detectoin Model: {self.configs.detectoin_model}")
+        detection_model = YOLO(self.configs.detectoin_model)
+        # sam_predictor = SAM('sam_l.pt') # SAM('mobile_sam.pt') # UltraLytics SAM
+        sam_predictor = SAM('mobile_sam.pt') # UltraLytics SAM
+        # sam_predictor = measure_time(get_sam_predictor)(cfg) # Normal SAM
+        clip_model, _, clip_preprocess = open_clip.create_model_and_transforms(self.configs.clip_name, 
+                                                                               self.configs.clip_pretrained)
+        clip_model = clip_model.to(self.configs.device)
+        clip_tokenizer = open_clip.get_tokenizer(self.configs.clip_name)
+
+        # Set the classes for the detection model
+        detection_model.set_classes(obj_classes.get_classes_arr())
+
+        openai_client = get_openai_client()
+
+
+    def build_scene(self):
+        det_exp_path.mkdir(parents=True, exist_ok=True)
+
+        
+
+if __name__ == "__main__":
+    scene_graph = SceneGraph()
+    scene_graph.init_dataset()
 
 
 
 def main(cfg : DictConfig):
-    tracker = MappingTracker()
-    
-    orr = OptionalReRun()
-    orr.set_use_rerun(cfg.use_rerun)
-    orr.init("realtime_mapping")
-    orr.spawn()
 
-    owandb = OptionalWandB()
-    owandb.set_use_wandb(cfg.use_wandb)
-    owandb.init(project="concept-graphs", 
-            #    entity="concept-graphs",
-                config=cfg_to_dict(cfg),
-               )
-    cfg = process_cfg(cfg)
-
-    # Initialize the dataset
-    dataset = get_dataset(
-        dataconfig=cfg.dataset_config,
-        start=cfg.start,
-        end=cfg.end,
-        stride=cfg.stride,
-        basedir=cfg.dataset_root,
-        sequence=cfg.scene_id,
-        desired_height=cfg.image_height,
-        desired_width=cfg.image_width,
-        device="cpu",
-        dtype=torch.float,
-    )
-    # cam_K = dataset.get_cam_K()
+   
 
     objects = MapObjectList(device=cfg.device)
     map_edges = MapEdgeMapping(objects)
@@ -188,24 +227,7 @@ def main(cfg : DictConfig):
     prev_adjusted_pose = None
 
     if run_detections:
-        print("\n".join(["Running detections..."] * 10))
-        det_exp_path.mkdir(parents=True, exist_ok=True)
 
-        ## Initialize the detection models
-        detection_model = measure_time(YOLO)('yolov8l-world.pt')
-        # sam_predictor = SAM('sam_l.pt') # SAM('mobile_sam.pt') # UltraLytics SAM
-        sam_predictor = SAM('mobile_sam.pt') # UltraLytics SAM
-        # sam_predictor = measure_time(get_sam_predictor)(cfg) # Normal SAM
-        clip_model, _, clip_preprocess = open_clip.create_model_and_transforms(
-            "ViT-H-14", "laion2b_s32b_b79k"
-        )
-        clip_model = clip_model.to(cfg.device)
-        clip_tokenizer = open_clip.get_tokenizer("ViT-H-14")
-
-        # Set the classes for the detection model
-        detection_model.set_classes(obj_classes.get_classes_arr())
-
-        openai_client = get_openai_client()
         
     else:
         print("\n".join(["NOT Running detections..."] * 10))

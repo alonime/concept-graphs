@@ -183,3 +183,56 @@ def get_obj_rel_from_image_gpt4v(client: OpenAI, image_path: str, label_list: li
     
     
     return vlm_answer
+
+
+def get_image_captions_w_gpt4v(client: OpenAI, image_path: str):
+    # Getting the base64 string
+    base64_image = encode_image_for_openai(image_path)
+       
+    system_prompt = f"Identify and describe objects in scenes. Input and output must be in JSON format. The input field ’captions’ contains a list of image captions \
+                   aiming to identify objects. Output ’summary’ as a concise description of the identified object(s). An object mentioned multiple times is likely \
+                   accurate. If various objects are repeated and a container/surface is noted such as a shelf or table, assume the (repeated) objects are on that \
+                   container/surface. For unrelated, non-repeating (or empty) captions, summarize as ’conflicting (or empty) captions about [objects]’ and set \
+                   ’object tag’ to ’invalid’. Output ’possible tags’ listing potential object categories. Set ’object tag’ as the conclusive identification. \
+                   Focus on indoor object types, as the input captions are from indoor scans."
+    
+    user_query = "Here is image of a scene, discribe the objects in the center of the image."
+    vlm_answer = []
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4-vision-preview",
+            messages=[
+                {
+                    "role": "system",
+                    "content": system_prompt
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": f"data:image/jpeg;base64,{base64_image}",
+                        },
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": user_query
+                }
+            ]
+        )
+        
+        vlm_answer_str = response.choices[0].message.content
+        print(f"Line 113, vlm_answer_str: {vlm_answer_str}")
+        
+        vlm_answer = extract_list_of_tuples(vlm_answer_str)
+
+    except Exception as e:
+        print(f"An error occurred: {str(e)}")
+        print(f"Setting vlm_answer to an empty list.")
+        vlm_answer = []
+    print(f"Line 68, user_query: {user_query}")
+    print(f"Line 97, vlm_answer: {vlm_answer}")
+    
+    
+    return vlm_answer

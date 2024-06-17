@@ -112,6 +112,7 @@ class DetectionList(list):
             
     
 class MapObjectList(DetectionList):
+    
     def compute_similarities(self, new_clip_ft):
         '''
         The input feature should be of shape (D, ), a one-row vector

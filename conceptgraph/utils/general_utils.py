@@ -11,7 +11,7 @@ from conceptgraph.slam.utils import prepare_objects_save_vis
 from conceptgraph.utils.ious import mask_subtract_contained
 import supervision as sv
 import scipy.ndimage as ndi 
-from conceptgraph.utils.vlm import get_obj_rel_from_image_gpt4v
+from conceptgraph.utils.vlm import get_obj_rel_from_image_gpt4v, get_image_captions_w_gpt4v
 import cv2
 
 
@@ -446,11 +446,13 @@ def make_vlm_edges(image, curr_det, obj_classes, detection_class_labels, det_exp
         label_nums = [f"object {str(label.split(' ')[-1])}" for label in labels]
         cv2.imwrite(str(vis_save_path_for_vlm), annotated_image_for_vlm)
         print(f"Line 313, vis_save_path_for_vlm: {vis_save_path_for_vlm}")
-        
+
+
+        captions = get_image_captions_w_gpt4v(openai_client, color_path)
         edges = get_obj_rel_from_image_gpt4v(openai_client, vis_save_path_for_vlm, label_nums)
         edge_image = plot_edges_from_vlm(annotated_image_for_vlm, edges, filtered_detections, obj_classes, labels, sorted_indices, save_path=vis_save_path_for_vlm_edges)
     
-    return labels, edges, edge_image
+    return labels, edges, edge_image, captions
     
 def handle_rerun_saving(use_rerun, save_rerun, exp_suffix, exp_out_path):
     # Save the rerun output if needed
