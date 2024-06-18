@@ -1,8 +1,3 @@
-'''
-The script is used to model Grounded SAM detections in 3D, it assumes the tag2text classes are avaialable. It also assumes the dataset has Clip features saved for each object/mask.
-'''
-
-# Standard library imports
 import os
 from pathlib import Path
 import pickle
@@ -15,16 +10,15 @@ import datetime
 # Third-party imports
 import cv2
 import numpy as np
-import scipy.ndimage as ndi
 import torch
-from PIL import Image
 from tqdm import trange
 from open3d.io import read_pinhole_camera_parameters
 import hydra
-from omegaconf import DictConfig
 import open_clip
 from ultralytics import YOLO, SAM
 import supervision as sv
+from omegaconf import OmegaConf
+
 
 from openai import OpenAI
 
@@ -87,7 +81,7 @@ from conceptgraph.slam.utils import (
     process_edges,
     process_pcd,
     processing_needed,
-    resize_obs
+    resize_gobs
 )
 from conceptgraph.slam.mapping import (
     compute_spatial_similarities,
@@ -108,20 +102,22 @@ class SceneGraphConfigs:
 
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
-    wandb: bool = True
+    wandb: bool = False
     "Log in wand indecator"
     build_visualization: Literal['rerun', 'open3d', 'none'] = 'rerun'
     dataset_root = Path("/home/liora/Lior/Datasets/record3d")
     scene_id= "workshop_smooth_depth_preprocessed"
     dataset_config= "dataconfig.yaml"
 
-    classes_file = "/conceptgraph/scannet200_classes.txt"
+    classes_file = "conceptgraph/scannet200_classes.txt"
     bg_classes = ["wall", "floor", "ceiling"]
-    render_camera_path: str = "/conceptgraph/dataset/dataconfigs/record3d/record_3d_camera.json"
     skip_bg: bool = False
+
+    render_camera_path: str = "conceptgraph/dataset/dataconfigs/record3d/record_3d_camera.json"
 
 
     detectoin_model: str = "yolov8l-world.pt"
+    detection_threshold: float = 0.3
     segmentaion_model: str = "mobile_sam.pt"  # UltraLytics SAM
     clip_name: str = "ViT-H-14"
     clip_pretrained: str = "laion2b_s32b_b79k"
@@ -158,19 +154,23 @@ class SceneGraph:
         self.clip_model, self.clip_preprocess, self.clip_tokenizer = None, None, None
         self.dataset = None
 
+        self.dataset_config_path = self.configs.dataset_root / self.configs.scene_id / self.configs.dataset_config
+        self.dataset_config = OmegaConf.load(self.dataset_config_path)
+
+
 
     def init_dataset(self,):
          # Initialize the dataset
-        self.dataset = get_dataset(dataconfig=self.configs.dataset_config,
-                                start=self.configs.start,
-                                end=self.configs.end,
-                                stride=self.configs.stride,
-                                basedir=self.configs.dataset_root,
-                                sequence=self.configs.scene_id,
-                                desired_height=self.configs.image_height,
-                                desired_width=self.configs.image_width,
-                                device="cpu",
-                                dtype=torch.float)
+        self.dataset = get_dataset(dataconfig=self.configs.dataset_root / self.configs.scene_id / self.configs.dataset_config, #TODO: @lior, refactor to dataset class
+                                   start=0,
+                                   end=-1,
+                                   stride=1,
+                                   basedir=self.configs.dataset_root,
+                                   sequence=self.configs.scene_id,
+                                   desired_height=self.dataset_config.camera_params.image_height,
+                                   desired_width=self.dataset_config.camera_params.image_width,
+                                   device="cpu",
+                                   dtype=torch.float)
         
     def init_models(self,):
         logging.info("Iinitazlize models:")
@@ -196,9 +196,9 @@ class SceneGraph:
 
     def build_scene(self):
 
-        assert self.dataset is None, "Dataset isn't initalize"
+        assert self.dataset is not None, "Dataset isn't initalize"
 
-        results_dir =  Path(self.configs.dataset_root) / self.configs.datasetscene_id / "exps" / datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        results_dir =  Path(self.configs.dataset_root) / self.configs.scene_id / "exps" / datetime.datetime.now().strftime("%Y_%m_%d_%H_%M")
         results_dir_detections = results_dir / "detections"
         results_dir_vis = results_dir / "vis"
 
@@ -219,16 +219,13 @@ class SceneGraph:
             counter+=1
             self.viz.set_time_sequence("frame", frame_idx)
 
-            # Read info about current frame from dataset
-            # color image
-            rgb_path = Path(self.dataset.rgb_paths[frame_idx])
-            # color and depth tensors, and camera instrinsics matrix
-            color_tensor, depth_tensor, intrinsics, *_ = self.dataset[frame_idx]
+            rgb_path = Path(self.dataset.color_paths[frame_idx])
+            rgb_tensor, depth_tensor, intrinsics, *_ = self.dataset[frame_idx]
 
             # Covert to numpy and do some sanity checks
             depth_tensor = depth_tensor[..., 0]
             depth_array = depth_tensor.cpu().numpy()
-            color_np = color_tensor.cpu().numpy() # (H, W, 3)
+            color_np = rgb_tensor.cpu().numpy() # (H, W, 3)
             image_rgb = (color_np).astype(np.uint8) # (H, W, 3)
             assert image_rgb.max() > 1, "Image is not in range [0, 255]"
 
@@ -242,7 +239,7 @@ class SceneGraph:
             image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
             # Do initial object detection
-            results = self.detection_model.predict(rgb_path, conf=0.1, verbose=False)
+            results = self.detection_model.predict(rgb_path, conf=self.configs.detection_threshold, verbose=False)
             confidences = results[0].boxes.conf.cpu().numpy()
             detection_class_ids = results[0].boxes.cls.cpu().numpy().astype(int)
             detection_class_labels = [f"{self.obj_classes.get_classes_arr()[class_id]} {class_idx}" for class_idx, class_id in enumerate(detection_class_ids)]
@@ -256,7 +253,7 @@ class SceneGraph:
 
                 masks_np = masks_tensor.cpu().numpy()
             else:
-                masks_np = np.empty((0, *color_tensor.shape[:2]), dtype=np.float64)
+                masks_np = np.empty((0, *rgb_tensor.shape[:2]), dtype=np.float64)
 
             # Create a detections object that we will save later
             curr_det = sv.Detections(
@@ -329,7 +326,7 @@ class SceneGraph:
             orr_log_vlm_image((results_dir_vis / rgb_path.name).with_suffix("w_edges.jpg"), label="w_edges")
 
             # resize the observation if needed
-            resized_grounded_obs = resize_obs(raw_grounded_obs, image_rgb)
+            resized_grounded_obs = resize_gobs(raw_grounded_obs, image_rgb)
             # filter the observations
             filtered_grounded_obs = filter_gobs(resized_grounded_obs, image_rgb, 
                 skip_bg=cfg.skip_bg,

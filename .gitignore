@@ -179,3 +179,4 @@ outputs
 *.pt
 latest_pcd_save
 *.jpg
+wandb
