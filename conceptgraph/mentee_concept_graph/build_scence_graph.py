@@ -91,7 +91,9 @@ from conceptgraph.slam.mapping import (
     merge_obj_matches
 )
 from conceptgraph.utils.model_utils import compute_clip_features_batched
-from conceptgraph.utils.general_utils import get_vis_out_path, cfg_to_dict, check_run_detections
+
+from conceptgraph.mentee_concept_graph.mentee_vlm import image_captioning
+
 
 
 # Disable torch gradient computation
@@ -124,7 +126,7 @@ class SceneGraphConfigs:
 
     save_detections = True
 
-    build_spetial_edges: bool = True
+    build_spetial_edges: bool = False
     mask_area_threshold: float = 25   # mask with pixel area less than this will be skipped
     mask_conf_threshold: float =0.2   # mask with lower confidence score will be skipped
     max_bbox_area_ratio: float = 1.0  # boxes with larger areas than this will be skipped
@@ -140,12 +142,12 @@ class SceneGraphConfigs:
     dbscan_min_points: float = 10
 
     phys_bias: float = 0.0
-    match_method: Literal["sep_thresh", "sim_sum"] =  "sep_thresh"
+    match_method: Literal["sep_thresh", "sim_sum"] =  "sim_sum"
     # Only when match_method=="sep_thresh"
     semantic_threshold: float = 0.5
     physical_threshold: float = 0.5
     # Only when match_method=="sim_sum"
-    sim_threshold: float = 0
+    sim_threshold: float = 1.2
 
     denoise_interval: int = 5           # Run DBSCAN every k frame. This operation is heavy
     filter_interval: int = 5            # Filter objects that have too few associations or are too small
@@ -256,7 +258,8 @@ class SceneGraph:
         prev_adjusted_pose = None
 
         counter = 0
-        for frame_idx in trange(len(self.dataset)):
+        # for frame_idx in trange(len(self.dataset)):
+        for frame_idx in trange(2):
             self.tracker.curr_frame_idx = frame_idx
             counter += 1
             self.viz.set_time_sequence("frame", frame_idx)
@@ -308,7 +311,7 @@ class SceneGraph:
             
 
             # Make the edges
-            labels, edges, edge_image, captions = make_vlm_edges(image, 
+            labels, edges, edge_image = make_vlm_edges(image, 
                                                                  curr_det, 
                                                                  self.obj_classes, 
                                                                  detection_class_labels, 
@@ -317,13 +320,17 @@ class SceneGraph:
                                                                  self.configs.build_spetial_edges, 
                                                                  self.openai_client)
 
-            
+            #TODO: move it to the end            
             image_crops, image_feats, text_feats = compute_clip_features_batched(image_rgb, 
-                                                                                 curr_det, self.clip_model, 
+                                                                                 curr_det, 
+                                                                                 self.clip_model, 
                                                                                  self.clip_preprocess, 
                                                                                  self.clip_tokenizer, 
                                                                                  self.obj_classes.get_classes_arr(), 
                                                                                  self.configs.device)
+            
+
+            image_crops_captions, captions = image_captioning(image_rgb, self.openai_client, curr_det)
 
             # increment total object detections
             self.tracker.increment_total_detections(len(curr_det.xyxy))
@@ -343,7 +350,7 @@ class SceneGraph:
                 "detection_class_labels": detection_class_labels,
                 "labels": labels,
                 "edges": edges,
-                "coptions": captions
+                "captions": captions
             }
 
             raw_grounded_obs = results
@@ -382,19 +389,19 @@ class SceneGraph:
                 orr_log_annotated_image(rgb_path, vis_save_path)
                 orr_log_depth_image(depth_tensor)
                 orr_log_vlm_image((results_dir_vis / rgb_path.name).with_suffix(".jpg"))
-                orr_log_vlm_image((results_dir_vis / rgb_path.name).with_suffix("w_edges.jpg"), label="w_edges")
+                orr_log_vlm_image((results_dir_vis / rgb_path.name).with_suffix(".jpg"), label="w_edges")
 
 
             # resize the observation if needed
             resized_grounded_obs = resize_gobs(raw_grounded_obs, image_rgb)
             # filter the observations
-            filtered_grounded_obs = filter_gobs(resized_grounded_obs, image_rgb, 
-                skip_bg=self.configs.skip_bg,
-                BG_CLASSES=self.obj_classes.get_bg_classes_arr(),
-                mask_area_threshold=self.configs.mask_area_threshold,
-                max_bbox_area_ratio=self.configs.max_bbox_area_ratio,
-                mask_conf_threshold=self.configs.mask_conf_threshold,
-            )
+            filtered_grounded_obs = filter_gobs(resized_grounded_obs, 
+                                                image_rgb, 
+                                                skip_bg=self.configs.skip_bg,
+                                                BG_CLASSES=self.obj_classes.get_bg_classes_arr(),
+                                                mask_area_threshold=self.configs.mask_area_threshold,
+                                                max_bbox_area_ratio=self.configs.max_bbox_area_ratio,
+                                                mask_conf_threshold=self.configs.mask_conf_threshold,)
 
             grounded_obs = filtered_grounded_obs
 
@@ -443,10 +450,11 @@ class SceneGraph:
             if len(objects) == 0:
                 objects.extend(detection_list)
                 self.tracker.increment_total_objects(len(detection_list))
-                self.owandb.log({
-                        "total_objects_so_far": self.tracker.get_total_objects(),
-                        "objects_this_frame": len(detection_list),
-                    })
+                if self.configs.wandb:
+                    self.owandb.log({
+                            "total_objects_so_far": self.tracker.get_total_objects(),
+                            "objects_this_frame": len(detection_list),
+                        })
                 continue 
 
             ### compute similarities and then merge
@@ -536,6 +544,7 @@ class SceneGraph:
                                                    device=self.configs.device,
                                                    do_edges=True,
                                                    map_edges=map_edges)
+                
             orr_log_objs_pcd_and_bbox(objects, self.obj_classes)
             orr_log_edges(objects, map_edges, self.obj_classes)
 
@@ -548,31 +557,33 @@ class SceneGraph:
                     adjusted_pose,
                     rgb_path
                 )
-
-            self.owandb.log({
-                "frame_idx": frame_idx,
-                "counter": counter,
-                "is_final_frame": is_final_frame,
-            })
-
-            self.tracker.increment_total_objects(len(objects))
-            self.tracker.increment_total_detections(len(detection_list))
-            self.owandb.log({
-                    "total_objects": self.tracker.get_total_objects(),
-                    "objects_this_frame": len(objects),
-                    "total_detections": self.tracker.get_total_detections(),
-                    "detections_this_frame": len(detection_list),
+            
+            if self.configs.wandb:
+                self.owandb.log({
                     "frame_idx": frame_idx,
                     "counter": counter,
                     "is_final_frame": is_final_frame,
-                    })
-            
+                })
+
+            self.tracker.increment_total_objects(len(objects))
+            self.tracker.increment_total_detections(len(detection_list))
+            if self.configs.wandb:
+                self.owandb.log({
+                        "total_objects": self.tracker.get_total_objects(),
+                        "objects_this_frame": len(objects),
+                        "total_detections": self.tracker.get_total_detections(),
+                        "detections_this_frame": len(detection_list),
+                        "frame_idx": frame_idx,
+                        "counter": counter,
+                        "is_final_frame": is_final_frame,
+                        })
+                
         # LOOP OVER -----------------------------------------------------
 
         # Save the pointcloud
         save_pointcloud(exp_suffix="",
                         exp_out_path=results_dir,
-                        cfg=self.configs,
+                        cfg=dataclasses.asdict(self.configs),
                         objects=objects,
                         obj_classes=self.obj_classes,
                         latest_pcd_filepath="latest_pcd_save.pcd",
@@ -584,13 +595,13 @@ class SceneGraph:
             save_meta_path = resutls_dir_objects / f"meta.pkl.gz"
             with gzip.open(save_meta_path, "wb") as f:
                 pickle.dump({
-                    'cfg': self.configs,
+                    'cfg': dataclasses.asdict(self.configs),
                     'class_names': self.obj_classes.get_classes_arr(),
                     'class_colors': self.obj_classes.get_class_color_dict_by_index(),
                 }, f)
 
-
-        self.owandb.finish()
+        if self.configs.wandb:
+            self.owandb.finish()
 
 
         

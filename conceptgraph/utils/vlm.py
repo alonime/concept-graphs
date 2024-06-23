@@ -181,9 +181,7 @@ def get_obj_rel_from_image_gpt4v(client: OpenAI, image_path: str, label_list: li
     return vlm_answer
 
 
-def get_image_captions_w_gpt4v(client: OpenAI, image_path: str):
-    # Getting the base64 string
-    base64_image = encode_image_for_openai(image_path)
+def get_image_captions_w_gpt4v(client: OpenAI, base64_image):
        
     system_prompt = f"Identify and describe objects in scenes. Input and output must be in JSON format. The input field ’captions’ contains a list of image captions \
                    aiming to identify objects. Output ’summary’ as a concise description of the identified object(s). An object mentioned multiple times is likely \

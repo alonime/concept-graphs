@@ -4,6 +4,7 @@ import os
 from conceptgraph.utils.general_utils import find_existing_image_path
 from conceptgraph.utils.geometry import rotation_matrix_to_quaternion
 import numpy as np
+import open3d
 
 class OptionalReRun:
     _instance = None
@@ -215,10 +216,15 @@ def orr_log_objs_pcd_and_bbox(objects, obj_classes):
 
         # Assuming bbox is extracted as before
         bbox = obj['bbox']
-        centers = [bbox.center]
-        half_sizes = [bbox.extent /2 ]
-        # Convert rotation matrix to quaternion
-        bbox_quaternion = [rotation_matrix_to_quaternion(bbox.R)]
+        if isinstance(bbox, open3d.geometry.AxisAlignedBoundingBox):
+            centers = (bbox.max_bound - bbox.min_bound) / 2 + bbox.min_bound
+            half_sizes =  (bbox.max_bound - bbox.min_bound) / 2
+            bbox_quaternion = [rotation_matrix_to_quaternion(np.eye(3))]
+        else:
+            centers = [bbox.center]
+            half_sizes = [bbox.extent /2 ]
+            # Convert rotation matrix to quaternion
+            bbox_quaternion = [rotation_matrix_to_quaternion(bbox.R)]
 
         bbox_entity = base_entity_path + "/bbox" + f"/{obj_label}"
         orr.log(
