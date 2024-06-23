@@ -154,6 +154,16 @@ class SceneGraphConfigs:
     run_filter_final_frame: bool = True
     run_merge_final_frame: bool = True
 
+    # For merge_overlap_objects() function
+    merge_overlap_thresh: float = 0.7      # -1 means do not perform the merge_overlap_objects()
+    merge_visual_sim_thresh: float = 0.7   # Merge only if the visual similarity is larger
+    merge_text_sim_thresh: float = 0.7     # Merge only if the text cosine sim is larger
+
+    # Selection criteria of the fused object point cloud
+    obj_min_points: int = 0
+    obj_min_detections: int = 3
+
+
 
 
 class SceneGraph:
@@ -230,9 +240,12 @@ class SceneGraph:
         results_dir =  Path(self.configs.dataset_root) / self.configs.scene_id / "exps" / datetime.datetime.now().strftime("%Y_%m_%d_%H_%M")
         results_dir_detections = results_dir / "detections"
         results_dir_vis = results_dir / "vis"
-
+        resutls_dir_objects = results_dir / "saved_obj_all_frames"
+        
         results_dir_detections.mkdir(exist_ok=True, parents=True)
         results_dir_vis.mkdir(exist_ok=True, parents=True)
+        resutls_dir_objects.mkdir(exist_ok=True, parents=True)
+
 
         logging.info(f"Save results in {results_dir}")
 
@@ -245,8 +258,9 @@ class SceneGraph:
         counter = 0
         for frame_idx in trange(len(self.dataset)):
             self.tracker.curr_frame_idx = frame_idx
-            counter+=1
+            counter += 1
             self.viz.set_time_sequence("frame", frame_idx)
+
 
             rgb_path = Path(self.dataset.color_paths[frame_idx])
             rgb_tensor, depth_tensor, intrinsics, *_ = self.dataset[frame_idx]
@@ -304,8 +318,12 @@ class SceneGraph:
                                                                  self.openai_client)
 
             
-            image_crops, image_feats, text_feats = compute_clip_features_batched(
-                image_rgb, curr_det, self.clip_model, self.clip_preprocess, self.clip_tokenizer, self.obj_classes.get_classes_arr(), self.configs.device)
+            image_crops, image_feats, text_feats = compute_clip_features_batched(image_rgb, 
+                                                                                 curr_det, self.clip_model, 
+                                                                                 self.clip_preprocess, 
+                                                                                 self.clip_tokenizer, 
+                                                                                 self.obj_classes.get_classes_arr(), 
+                                                                                 self.configs.device)
 
             # increment total object detections
             self.tracker.increment_total_detections(len(curr_det.xyxy))
@@ -500,102 +518,78 @@ class SceneGraph:
                                          map_edges=map_edges)
 
             # Merging
-            if processing_needed(
-                cfg["merge_interval"],
-                cfg["run_merge_final_frame"],
-                frame_idx,
-                is_final_frame,
-            ):
-                objects, map_edges = measure_time(merge_objects)(
-                    merge_overlap_thresh=cfg["merge_overlap_thresh"],
-                    merge_visual_sim_thresh=cfg["merge_visual_sim_thresh"],
-                    merge_text_sim_thresh=cfg["merge_text_sim_thresh"],
-                    objects=objects,
-                    downsample_voxel_size=cfg["downsample_voxel_size"],
-                    dbscan_remove_noise=cfg["dbscan_remove_noise"],
-                    dbscan_eps=cfg["dbscan_eps"],
-                    dbscan_min_points=cfg["dbscan_min_points"],
-                    spatial_sim_type=self.configs.spatial_sim_type,
-                    device=cfg["device"],
-                    do_edges=cfg["make_edges"],
-                    map_edges=map_edges
-                )
+            if processing_needed(self.configs.merge_interval,
+                                 self.configs.run_merge_final_frame,
+                                 frame_idx,
+                                 is_final_frame):
+                
+                objects, map_edges = merge_objects(merge_overlap_thresh=self.configs.merge_overlap_thresh,
+                                                   merge_visual_sim_thresh=self.configs.merge_visual_sim_thresh,
+                                                   merge_text_sim_thresh=self.configs.merge_text_sim_thresh,
+                                                   objects=objects,
+                                                   downsample_voxel_size=self.configs.downsample_voxel_size,
+                                                   dbscan_remove_noise=self.configs.dbscan_remove_noise,
+                                                   dbscan_eps=self.configs.dbscan_eps,
+                                                   dbscan_min_points=self.configs.dbscan_min_points,
+                                                   spatial_sim_type=self.configs.spatial_sim_type,
+                                                   device=self.configs.device,
+                                                   do_edges=True,
+                                                   map_edges=map_edges)
             orr_log_objs_pcd_and_bbox(objects, self.obj_classes)
             orr_log_edges(objects, map_edges, self.obj_classes)
 
-            if cfg.save_objects_all_frames:
+            if self.configs.save_detections:
                 save_objects_for_frame(
-                    obj_all_frames_out_path,
+                    resutls_dir_objects,
                     frame_idx,
                     objects,
-                    cfg.obj_min_detections,
+                    self.configs.obj_min_detections,
                     adjusted_pose,
                     rgb_path
                 )
 
-            if cfg.periodically_save_pcd and (counter % cfg.periodically_save_pcd_interval == 0):
-                # save the pointcloud
-                save_pointcloud(
-                    exp_suffix=cfg.exp_suffix,
-                    exp_out_path=exp_out_path,
-                    cfg=cfg,
-                    objects=objects,
-                    obj_classes=self.obj_classes,
-                    latest_pcd_filepath=cfg.latest_pcd_filepath,
-                    create_symlink=True
-                )
-
-            owandb.log({
+            self.owandb.log({
                 "frame_idx": frame_idx,
                 "counter": counter,
-                "exit_early_flag": exit_early_flag,
                 "is_final_frame": is_final_frame,
             })
 
-            tracker.increment_total_objects(len(objects))
-            tracker.increment_total_detections(len(detection_list))
-            owandb.log({
-                    "total_objects": tracker.get_total_objects(),
+            self.tracker.increment_total_objects(len(objects))
+            self.tracker.increment_total_detections(len(detection_list))
+            self.owandb.log({
+                    "total_objects": self.tracker.get_total_objects(),
                     "objects_this_frame": len(objects),
-                    "total_detections": tracker.get_total_detections(),
+                    "total_detections": self.tracker.get_total_detections(),
                     "detections_this_frame": len(detection_list),
                     "frame_idx": frame_idx,
                     "counter": counter,
-                    "exit_early_flag": exit_early_flag,
                     "is_final_frame": is_final_frame,
                     })
+            
         # LOOP OVER -----------------------------------------------------
-        
-        handle_rerun_saving(cfg.use_rerun, cfg.save_rerun, cfg.exp_suffix, exp_out_path)
 
         # Save the pointcloud
-        if cfg.save_pcd:
-            save_pointcloud(
-                exp_suffix=cfg.exp_suffix,
-                exp_out_path=exp_out_path,
-                cfg=cfg,
-                objects=objects,
-                obj_classes=obj_classes,
-                latest_pcd_filepath=cfg.latest_pcd_filepath,
-                create_symlink=True,
-                edges=map_edges
-            )
+        save_pointcloud(exp_suffix="",
+                        exp_out_path=results_dir,
+                        cfg=self.configs,
+                        objects=objects,
+                        obj_classes=self.obj_classes,
+                        latest_pcd_filepath="latest_pcd_save.pcd",
+                        create_symlink=True,
+                        edges=map_edges)
 
         # Save metadata if all frames are saved
-        if cfg.save_objects_all_frames:
-            save_meta_path = obj_all_frames_out_path / f"meta.pkl.gz"
+        if self.configs.save_detections:
+            save_meta_path = resutls_dir_objects / f"meta.pkl.gz"
             with gzip.open(save_meta_path, "wb") as f:
                 pickle.dump({
-                    'cfg': cfg,
-                    'class_names': obj_classes.get_classes_arr(),
-                    'class_colors': obj_classes.get_class_color_dict_by_index(),
+                    'cfg': self.configs,
+                    'class_names': self.obj_classes.get_classes_arr(),
+                    'class_colors': self.obj_classes.get_class_color_dict_by_index(),
                 }, f)
 
-        if run_detections:
-            if cfg.save_video:
-                save_video_detections(det_exp_path)
 
-        owandb.finish()
+        self.owandb.finish()
 
 
         
