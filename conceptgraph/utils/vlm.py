@@ -169,17 +169,13 @@ def get_obj_rel_from_image_gpt4v(client: OpenAI, image_path: str, label_list: li
             ]
         )
         
-        vlm_answer_str = response.choices[0].message.content
-        print(f"Line 113, vlm_answer_str: {vlm_answer_str}")
-        
-        vlm_answer = extract_list_of_tuples(vlm_answer_str)
+        vlm_answer_str = response.choices[0].message.content 
+        vlm_answer = extract_list_of_tuples(vlm_answer_str)       
 
     except Exception as e:
         print(f"An error occurred: {str(e)}")
         print(f"Setting vlm_answer to an empty list.")
         vlm_answer = []
-    print(f"Line 68, user_query: {user_query}")
-    print(f"Line 97, vlm_answer: {vlm_answer}")
     
     
     return vlm_answer
@@ -223,7 +219,6 @@ def get_image_captions_w_gpt4v(client: OpenAI, image_path: str):
         )
         
         vlm_answer_str = response.choices[0].message.content
-        print(f"Line 113, vlm_answer_str: {vlm_answer_str}")
         
         vlm_answer = extract_list_of_tuples(vlm_answer_str)
 
@@ -231,8 +226,6 @@ def get_image_captions_w_gpt4v(client: OpenAI, image_path: str):
         print(f"An error occurred: {str(e)}")
         print(f"Setting vlm_answer to an empty list.")
         vlm_answer = []
-    print(f"Line 68, user_query: {user_query}")
-    print(f"Line 97, vlm_answer: {vlm_answer}")
     
     
     return vlm_answer

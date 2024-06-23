@@ -130,7 +130,7 @@ class SceneGraphConfigs:
     max_bbox_area_ratio: float = 1.0  # boxes with larger areas than this will be skipped
     min_points_threshold: int = 16    # projected and sampled pcd with less points will be skipped
     spatial_sim_type: Literal["iou", "giou", "overlap"] = "iou" # "iou", "giou", "overlap"
-    obj_pcd_max_points: 5000 
+    obj_pcd_max_points: int = 5000 
     """ Determines the maximum point count for object point clouds; exceeding this triggers downsampling to approx max points. Set to -1 to disable """
 
     # point cloud processing
@@ -343,6 +343,7 @@ class SceneGraph:
                 "detection_class_labels": detection_class_labels,
                 "labels": labels,
                 "edges": edges,
+                "coptions": captions
             }
 
             raw_grounded_obs = results
