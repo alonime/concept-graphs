@@ -1080,6 +1080,7 @@ def make_detection_list_from_pcd_and_gobs(
             'bbox': obj_pcds_and_bboxes[mask_idx]['bbox'],
             'clip_ft': to_tensor(gobs['image_feats'][mask_idx]),
             # 'text_ft': to_tensor(gobs['text_feats'][mask_idx]),
+            'caption': [gobs['caption'][mask_idx]],
             'num_obj_in_class': num_obj_in_class,
             'curr_obj_num': tracker.total_object_count,
             'new_counter' : tracker.brand_new_counter,
@@ -1332,7 +1333,7 @@ def     prepare_objects_save_vis(objects: MapObjectList, downsample_size: float=
     for i in range(len(objects_to_save)):
         for k in list(objects_to_save[i].keys()):
             if k not in [
-                'pcd', 'bbox', 'clip_ft', 'text_ft', 'class_id', 'num_detections', 'inst_color'
+                'pcd', 'bbox', 'clip_ft', 'text_ft', 'class_id', 'num_detections', 'inst_color', 'caption'
             ]:
                 del objects_to_save[i][k]
                 
@@ -1386,7 +1387,7 @@ def process_edges(match_indices, gobs, initial_objects_count, objects, map_edges
 
         curr_edges_3d_by_index.append((obj1_objects_index, relation, obj2_objects_index))
 
-    print(f"Line 624, curr_edges_3d_by_index: {curr_edges_3d_by_index}")
+    # print(f"Line 624, curr_edges_3d_by_index: {curr_edges_3d_by_index}")
     
     # Add the new edges to the map
     for (obj_1_idx, rel_type, obj_2_idx) in curr_edges_3d_by_index:

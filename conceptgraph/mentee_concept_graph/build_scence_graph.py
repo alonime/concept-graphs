@@ -131,7 +131,7 @@ class SceneGraphConfigs:
     mask_conf_threshold: float =0.2   # mask with lower confidence score will be skipped
     max_bbox_area_ratio: float = 1.0  # boxes with larger areas than this will be skipped
     min_points_threshold: int = 16    # projected and sampled pcd with less points will be skipped
-    spatial_sim_type: Literal["iou", "giou", "overlap"] = "iou" # "iou", "giou", "overlap"
+    spatial_sim_type: Literal["iou", "giou", "overlap"] = "overlap" 
     obj_pcd_max_points: int = 5000 
     """ Determines the maximum point count for object point clouds; exceeding this triggers downsampling to approx max points. Set to -1 to disable """
 
@@ -330,7 +330,6 @@ class SceneGraph:
                                                                                  self.configs.device)
             
 
-            image_crops_captions, captions = image_captioning(image_rgb, self.openai_client, curr_det)
 
             # increment total object detections
             self.tracker.increment_total_detections(len(curr_det.xyxy))
@@ -350,7 +349,6 @@ class SceneGraph:
                 "detection_class_labels": detection_class_labels,
                 "labels": labels,
                 "edges": edges,
-                "captions": captions
             }
 
             raw_grounded_obs = results
@@ -411,35 +409,35 @@ class SceneGraph:
             # this helps make sure things like pillows on couches are separate objects
             grounded_obs['mask'] = mask_subtract_contained(grounded_obs['xyxy'], grounded_obs['mask'])
 
-            obj_pcds_and_bboxes = measure_time(detections_to_obj_pcd_and_bbox)(
-                depth_array=depth_array,
-                masks=grounded_obs['mask'],
-                cam_K=intrinsics.cpu().numpy()[:3, :3],  # Camera intrinsics
-                image_rgb=image_rgb,
-                trans_pose=adjusted_pose,
-                min_points_threshold=self.configs.min_points_threshold,
-                spatial_sim_type=self.configs.spatial_sim_type,
-                obj_pcd_max_points=self.configs.obj_pcd_max_points,
-                device=self.configs.device,
-            )
+            obj_pcds_and_bboxes = detections_to_obj_pcd_and_bbox(depth_array=depth_array,
+                                                                 masks=grounded_obs['mask'],
+                                                                 cam_K=intrinsics.cpu().numpy()[:3, :3],  # Camera intrinsics
+                                                                 image_rgb=image_rgb,
+                                                                 trans_pose=adjusted_pose,
+                                                                 min_points_threshold=self.configs.min_points_threshold,
+                                                                 spatial_sim_type=self.configs.spatial_sim_type,
+                                                                 obj_pcd_max_points=self.configs.obj_pcd_max_points,
+                                                                 device=self.configs.device)
 
             for obj in obj_pcds_and_bboxes:
                 if obj:
-                    obj["pcd"] = init_process_pcd(
-                        pcd=obj["pcd"],
-                        downsample_voxel_size=self.configs.downsample_voxel_size,
-                        dbscan_remove_noise=self.configs.dbscan_remove_noise,
-                        dbscan_eps=self.configs.dbscan_eps,
-                        dbscan_min_points=self.configs.dbscan_min_points,
-                    )
-                    obj["bbox"] = get_bounding_box(
-                        spatial_sim_type=self.configs.spatial_sim_type, 
-                        pcd=obj["pcd"],
-                    )
+                    obj["pcd"] = init_process_pcd(pcd=obj["pcd"],
+                                                  downsample_voxel_size=self.configs.downsample_voxel_size,
+                                                  dbscan_remove_noise=self.configs.dbscan_remove_noise,
+                                                  dbscan_eps=self.configs.dbscan_eps,
+                                                  dbscan_min_points=self.configs.dbscan_min_points,)
+                    
+                    obj["bbox"] = get_bounding_box(spatial_sim_type=self.configs.spatial_sim_type, 
+                                                   pcd=obj["pcd"])
+                    
+            
+            grounded_obs = image_captioning(rgb_path, self.openai_client, grounded_obs, obj_pcds_and_bboxes)
 
-            detection_list = make_detection_list_from_pcd_and_gobs(
-                obj_pcds_and_bboxes, grounded_obs, rgb_path, self.obj_classes, frame_idx
-            )
+            detection_list = make_detection_list_from_pcd_and_gobs(obj_pcds_and_bboxes, 
+                                                                   grounded_obs, 
+                                                                   rgb_path, 
+                                                                   self.obj_classes, 
+                                                                   frame_idx)
 
             if len(detection_list) == 0: # no detections, skip
                 continue
@@ -549,39 +547,33 @@ class SceneGraph:
             orr_log_edges(objects, map_edges, self.obj_classes)
 
             if self.configs.save_detections:
-                save_objects_for_frame(
-                    resutls_dir_objects,
-                    frame_idx,
-                    objects,
-                    self.configs.obj_min_detections,
-                    adjusted_pose,
-                    rgb_path
-                )
+                save_objects_for_frame(resutls_dir_objects,
+                                       frame_idx,
+                                       objects,
+                                       self.configs.obj_min_detections,
+                                       adjusted_pose,
+                                       rgb_path)
             
             if self.configs.wandb:
-                self.owandb.log({
-                    "frame_idx": frame_idx,
-                    "counter": counter,
-                    "is_final_frame": is_final_frame,
-                })
+                self.owandb.log({"frame_idx": frame_idx,
+                                 "counter": counter,
+                                 "is_final_frame": is_final_frame,})
 
             self.tracker.increment_total_objects(len(objects))
             self.tracker.increment_total_detections(len(detection_list))
             if self.configs.wandb:
-                self.owandb.log({
-                        "total_objects": self.tracker.get_total_objects(),
-                        "objects_this_frame": len(objects),
-                        "total_detections": self.tracker.get_total_detections(),
-                        "detections_this_frame": len(detection_list),
-                        "frame_idx": frame_idx,
-                        "counter": counter,
-                        "is_final_frame": is_final_frame,
-                        })
+                self.owandb.log({"total_objects": self.tracker.get_total_objects(),
+                                 "objects_this_frame": len(objects),
+                                 "total_detections": self.tracker.get_total_detections(),
+                                 "detections_this_frame": len(detection_list),
+                                 "frame_idx": frame_idx,
+                                 "counter": counter,
+                                 "is_final_frame": is_final_frame,})
                 
         # LOOP OVER -----------------------------------------------------
 
         # Save the pointcloud
-        save_pointcloud(exp_suffix="",
+        save_pointcloud(exp_suffix="final_results",
                         exp_out_path=results_dir,
                         cfg=dataclasses.asdict(self.configs),
                         objects=objects,
@@ -594,18 +586,15 @@ class SceneGraph:
         if self.configs.save_detections:
             save_meta_path = resutls_dir_objects / f"meta.pkl.gz"
             with gzip.open(save_meta_path, "wb") as f:
-                pickle.dump({
-                    'cfg': dataclasses.asdict(self.configs),
-                    'class_names': self.obj_classes.get_classes_arr(),
-                    'class_colors': self.obj_classes.get_class_color_dict_by_index(),
-                }, f)
+                pickle.dump({'cfg': dataclasses.asdict(self.configs),
+                             'class_names': self.obj_classes.get_classes_arr(),
+                             'class_colors': self.obj_classes.get_class_color_dict_by_index()}, f)
 
         if self.configs.wandb:
             self.owandb.finish()
 
 
         
-
 if __name__ == "__main__":
     scene_graph = SceneGraph()
     scene_graph.init_dataset()

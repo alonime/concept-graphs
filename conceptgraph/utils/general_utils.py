@@ -14,7 +14,6 @@ import scipy.ndimage as ndi
 from conceptgraph.utils.vlm import get_obj_rel_from_image_gpt4v, get_image_captions_w_gpt4v
 import cv2
 
-
 from omegaconf import OmegaConf
 import torch
 import numpy as np
@@ -448,11 +447,10 @@ def make_vlm_edges(image, curr_det, obj_classes, detection_class_labels, det_exp
         print(f"Line 313, vis_save_path_for_vlm: {vis_save_path_for_vlm}")
 
 
-        captions = get_image_captions_w_gpt4v(openai_client, color_path)
         edges = get_obj_rel_from_image_gpt4v(openai_client, vis_save_path_for_vlm, label_nums)
         edge_image = plot_edges_from_vlm(annotated_image_for_vlm, edges, filtered_detections, obj_classes, labels, sorted_indices, save_path=vis_save_path_for_vlm_edges)
     
-    return labels, edges, edge_image, captions
+    return labels, edges, edge_image
     
 def handle_rerun_saving(use_rerun, save_rerun, exp_suffix, exp_out_path):
     # Save the rerun output if needed

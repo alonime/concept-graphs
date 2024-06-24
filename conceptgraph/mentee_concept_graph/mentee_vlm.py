@@ -8,7 +8,7 @@ from conceptgraph.utils.vlm import get_image_captions_w_gpt4v
 
 
 
-def image_captioning(image, openai_clent, detections, padding: int = 40):
+def image_captioning(image, openai_clent, detections, pcds, padding: int = 40):
     
     image = Image.fromarray(image)
     
