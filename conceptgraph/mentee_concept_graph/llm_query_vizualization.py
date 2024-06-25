@@ -12,14 +12,16 @@ import os
 import pickle
 import gzip
 import argparse
+from PIL import Image
 
 import matplotlib
+import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 import open3d as o3d
 import torch
 import torch.nn.functional as F
 import open_clip
+from openai import OpenAI
 
 import distinctipy
 
@@ -29,6 +31,7 @@ from conceptgraph.utils.pointclouds import Pointclouds
 from conceptgraph.slam.slam_classes import MapObjectList
 from conceptgraph.utils.vis import LineMesh
 from conceptgraph.slam.utils import filter_objects, merge_objects
+from conceptgraph.mentee_concept_graph.llm_query import llm_retrive_object
 
 def create_ball_mesh(center, radius, color=(0, 1, 0)):
     """
@@ -93,6 +96,8 @@ def load_result(result_path):
 def main(args):
     result_path = args.result_path
     rgb_pcd_path = args.rgb_pcd_path
+    openai_client =  OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+
     
     assert not (result_path is None and rgb_pcd_path is None), \
         "Either result_path or rgb_pcd_path must be provided."
@@ -154,6 +159,13 @@ def main(args):
         clip_tokenizer = open_clip.get_tokenizer("ViT-H-14")
         print("Done initializing CLIP model.")
 
+    print("Building json captioning")
+    objects_captions = {}
+    for idx in range(len(objects)):
+        objects_captions[idx] = objects[idx]['caption']
+    
+    objects_captions_json = json.dumps(objects_captions)
+
     cmap = matplotlib.colormaps.get_cmap("turbo")
     
     if bg_objects is not None:
@@ -195,6 +207,8 @@ def main(args):
     # Add geometry to the scene
     for geometry in pcds + bboxes:
         vis.add_geometry(geometry)
+
+    print('Done loading!')
         
     main.show_bg_pcd = True
     def toggle_bg_pcd(vis):
@@ -324,51 +338,53 @@ def main(args):
             vis.update_geometry(pcd)
 
     def color_by_llm_query(vis):
-        if args.no_clip:
-            print("CLIP model is not initialized.")
-            return
 
         text_query = input("Enter your query: ")
-        text_queries = [text_query]
-        
-        text_queries_tokenized = clip_tokenizer(text_queries).to("cuda")
-        text_query_ft = clip_model.encode_text(text_queries_tokenized)
-        text_query_ft = text_query_ft / text_query_ft.norm(dim=-1, keepdim=True)
-        text_query_ft = text_query_ft.squeeze()
-        
-        # similarities = objects.compute_similarities(text_query_ft)
-        objects_clip_fts = objects.get_stacked_values_torch("clip_ft")
-        objects_clip_fts = objects_clip_fts.to("cuda")
-        similarities = F.cosine_similarity(
-            text_query_ft.unsqueeze(0), objects_clip_fts, dim=-1
-        )
-        max_value = similarities.max()
-        min_value = similarities.min()
-        normalized_similarities = (similarities - min_value) / (max_value - min_value)
-        probs = F.softmax(similarities, dim=0)
-        max_prob_idx = torch.argmax(probs)
-        similarity_colors = cmap(normalized_similarities.detach().cpu().numpy())[..., :3]
 
-        max_prob_object = objects[max_prob_idx]
-        print(f"Most probable object is at index {max_prob_idx} with class name '{max_prob_object['class_name']}'")
-        print(f"location xyz: {max_prob_object['bbox'].center}")
-        
-        for i in range(len(objects)):
-            pcd = pcds[i]
-            map_colors = np.asarray(pcd.colors)
-            pcd.colors = o3d.utility.Vector3dVector(
-                np.tile(
-                    [
-                        similarity_colors[i, 0].item(),
-                        similarity_colors[i, 1].item(),
-                        similarity_colors[i, 2].item()
-                    ], 
-                    (len(pcd.points), 1)
+        llm_response = llm_retrive_object(openai_client, text_query, objects_captions_json)
+     
+        if llm_response['query_achievable'] and len(llm_response['relevant_objects']):
+            print("Found a fits object")
+            print(f"LLM inferred task: {llm_response['inferred_query']}")
+            best_fits = llm_response['final_relevant_objects'][0]
+            print(f"Most probable object is with class name {objects[best_fits]['class_name']}")
+            print(f"The first Caption is {objects[best_fits]['caption'][0]}")
+            print(f"The LLM reasoning is: {llm_response['explanation']}")
+
+            print(f"location xyz: {objects[best_fits]['bbox'].center}")
+
+
+            objects_colors = np.zeros(len(objects))
+            objects_colors[best_fits] = 1
+            similarity_colors = cmap(objects_colors)[..., :3]
+            img = Image.open(objects[best_fits]['color_path'][0])
+
+
+            for i in range(len(objects)):
+                pcd = pcds[i]
+                map_colors = np.asarray(pcd.colors)
+                pcd.colors = o3d.utility.Vector3dVector(
+                    np.tile(
+                        [
+                            similarity_colors[i, 0].item(),
+                            similarity_colors[i, 1].item(),
+                            similarity_colors[i, 2].item()
+                        ], 
+                        (len(pcd.points), 1)
+                    )
                 )
-            )
 
-        for pcd in pcds:
-            vis.update_geometry(pcd)
+            for pcd in pcds:
+                vis.update_geometry(pcd)
+            
+            cv2.imshow('Image', cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR))
+            cv2.waitKey(0)
+            cv2.destroyAllWindows()
+
+
+        else:
+            print("Didn't find suitable object")
+
             
     def save_view_params(vis):
         param = vis.get_view_control().convert_to_pinhole_camera_parameters()

@@ -180,3 +180,4 @@ outputs
 latest_pcd_save
 *.jpg
 wandb
+*.pcd

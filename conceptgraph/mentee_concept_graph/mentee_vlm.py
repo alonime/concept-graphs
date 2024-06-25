@@ -2,6 +2,7 @@ import torch
 from PIL import Image
 import io
 import base64
+import numpy as np
 
 from conceptgraph.utils.vlm import get_image_captions_w_gpt4v
 
@@ -10,14 +11,19 @@ from conceptgraph.utils.vlm import get_image_captions_w_gpt4v
 
 def image_captioning(image, openai_clent, detections, pcds, padding: int = 40):
     
+    assert len(detections['xyxy']) == len(pcds), "pcds and detections lens are not equal"
+
     image = Image.fromarray(image)
+
+    n_detections = len(pcds)
     
-    image_crops = []
-    crops_captions = []
+    image_crops = [[]] * n_detections
+    crops_captions = [[]] * n_detections
+    valid_idx = np.where([pcd is not None for pcd in pcds])[0]
     
     # Prepare data for batch processing
-    for idx in range(len(detections.xyxy)):
-        x_min, y_min, x_max, y_max = detections.xyxy[idx]
+    for idx in valid_idx:
+        x_min, y_min, x_max, y_max = detections['xyxy'][idx]
         image_width, image_height = image.size
         left_padding = min(padding, x_min)
         top_padding = min(padding, y_min)
@@ -36,8 +42,8 @@ def image_captioning(image, openai_clent, detections, pcds, padding: int = 40):
 
     
         captions = get_image_captions_w_gpt4v(openai_clent, encoded_cropped_image)
-        crops_captions.append(captions)
-        image_crops.append(cropped_image)
+        crops_captions.insert(idx,captions)
+        image_crops.insert(idx, cropped_image)
 
     
     return image_crops, crops_captions

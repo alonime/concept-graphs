@@ -291,7 +291,7 @@ def merge_obj2_into_obj1(obj1, obj2, downsample_voxel_size, dbscan_remove_noise,
     tracker.track_merge(obj1, obj2)
     
     # Attributes to be explicitly handled
-    extend_attributes = ['image_idx', 'mask_idx', 'color_path', 'class_id', 'mask', 'xyxy', 'conf', 'contain_number']
+    extend_attributes = ['image_idx', 'mask_idx', 'color_path', 'class_id', 'mask', 'xyxy', 'conf', 'contain_number', 'caption']
     add_attributes = ['num_detections', 'num_obj_in_class']
     skip_attributes = ['id', 'class_name', 'is_background', 'new_counter', 'curr_obj_num', 'inst_color']  # 'inst_color' just keeps obj1's
     custom_handled = ['pcd', 'bbox', 'clip_ft', 'text_ft', 'n_points']
@@ -316,10 +316,11 @@ def merge_obj2_into_obj1(obj1, obj2, downsample_voxel_size, dbscan_remove_noise,
     n_obj2_det = obj2['num_detections']
     
         # Handling 'caption'
-    if 'caption' in obj1 and 'caption' in obj2:
-        n_obj1_det = obj1['num_detections']
-        for key, value in obj2['caption'].items():
-            obj1['caption'][key + n_obj1_det] = value
+        #TODO: lior, this is the original code for caption handling
+    # if 'caption' in obj1 and 'caption' in obj2:
+    #     n_obj1_det = obj1['num_detections']
+    #     for key, value in obj2['caption'].items():
+    #         obj1['caption'][key + n_obj1_det] = value
 
     # merge pcd and bbox
     obj1['pcd'] += obj2['pcd']
@@ -1080,7 +1081,7 @@ def make_detection_list_from_pcd_and_gobs(
             'bbox': obj_pcds_and_bboxes[mask_idx]['bbox'],
             'clip_ft': to_tensor(gobs['image_feats'][mask_idx]),
             # 'text_ft': to_tensor(gobs['text_feats'][mask_idx]),
-            'caption': [gobs['caption'][mask_idx]],
+            'caption': gobs['caption'][mask_idx],
             'num_obj_in_class': num_obj_in_class,
             'curr_obj_num': tracker.total_object_count,
             'new_counter' : tracker.brand_new_counter,

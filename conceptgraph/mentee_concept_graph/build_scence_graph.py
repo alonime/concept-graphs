@@ -95,7 +95,6 @@ from conceptgraph.utils.model_utils import compute_clip_features_batched
 from conceptgraph.mentee_concept_graph.mentee_vlm import image_captioning
 
 
-
 # Disable torch gradient computation
 torch.set_grad_enabled(False)
 
@@ -103,6 +102,8 @@ torch.set_grad_enabled(False)
 class SceneGraphConfigs:
 
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
+
+    dataset_stride: int = 5
 
     wandb: bool = False
     "Log in wand indecator"
@@ -205,7 +206,7 @@ class SceneGraph:
         self.dataset = get_dataset(dataconfig=self.configs.dataset_root / self.configs.scene_id / self.configs.dataset_config, #TODO: @lior, refactor to dataset class
                                    start=0,
                                    end=-1,
-                                   stride=1,
+                                   stride=self.configs.dataset_stride,
                                    basedir=self.configs.dataset_root,
                                    sequence=self.configs.scene_id,
                                    desired_height=self.dataset_config.camera_params.image_height,
@@ -258,8 +259,8 @@ class SceneGraph:
         prev_adjusted_pose = None
 
         counter = 0
-        # for frame_idx in trange(len(self.dataset)):
-        for frame_idx in trange(2):
+        for frame_idx in trange(len(self.dataset)):
+        # for frame_idx in trange(10):
             self.tracker.curr_frame_idx = frame_idx
             counter += 1
             self.viz.set_time_sequence("frame", frame_idx)
@@ -431,7 +432,8 @@ class SceneGraph:
                                                    pcd=obj["pcd"])
                     
             
-            grounded_obs = image_captioning(rgb_path, self.openai_client, grounded_obs, obj_pcds_and_bboxes)
+            captions_crops, detections_captions = image_captioning(image_rgb, self.openai_client, grounded_obs, obj_pcds_and_bboxes)
+            grounded_obs['caption'] = detections_captions
 
             detection_list = make_detection_list_from_pcd_and_gobs(obj_pcds_and_bboxes, 
                                                                    grounded_obs, 
@@ -449,10 +451,8 @@ class SceneGraph:
                 objects.extend(detection_list)
                 self.tracker.increment_total_objects(len(detection_list))
                 if self.configs.wandb:
-                    self.owandb.log({
-                            "total_objects_so_far": self.tracker.get_total_objects(),
-                            "objects_this_frame": len(detection_list),
-                        })
+                    self.owandb.log({"total_objects_so_far": self.tracker.get_total_objects(),
+                                     "objects_this_frame": len(detection_list)})
                 continue 
 
             ### compute similarities and then merge
@@ -465,32 +465,28 @@ class SceneGraph:
 
             visual_sim = compute_visual_similarities(detection_list, objects)
 
-            agg_sim = aggregate_similarities(
-                match_method=self.configs.match_method, 
-                phys_bias=self.configs.phys_bias, 
-                spatial_sim=spatial_sim, 
-                visual_sim=visual_sim
-            )
+            agg_sim = aggregate_similarities(match_method=self.configs.match_method, 
+                                             phys_bias=self.configs.phys_bias, 
+                                             spatial_sim=spatial_sim, 
+                                             visual_sim=visual_sim)
+            
 
             # Perform matching of detections to existing objects
-            match_indices = match_detections_to_objects(
-                agg_sim=agg_sim, 
-                detection_threshold=self.configs.sim_threshold  # Use the sim_threshold from the configuration
-            )
+            match_indices = match_detections_to_objects(agg_sim=agg_sim, 
+                                                        detection_threshold=self.configs.sim_threshold)
 
             # Now merge the detected objects into the existing objects based on the match indices
-            objects = merge_obj_matches(
-                detection_list=detection_list, 
-                objects=objects, 
-                match_indices=match_indices,
-                downsample_voxel_size=self.configs.downsample_voxel_size, 
-                dbscan_remove_noise=self.configs.dbscan_remove_noise, 
-                dbscan_eps=self.configs.dbscan_eps, 
-                dbscan_min_points=self.configs.dbscan_min_points, 
-                spatial_sim_type=self.configs.spatial_sim_type, 
-                device=self.configs.device
-                # Note: Removed 'match_method' and 'phys_bias' as they do not appear in the provided merge function
-            )
+            objects = merge_obj_matches(detection_list=detection_list, 
+                                        objects=objects,
+                                        match_indices=match_indices,
+                                        downsample_voxel_size=self.configs.downsample_voxel_size, 
+                                        dbscan_remove_noise=self.configs.dbscan_remove_noise, 
+                                        dbscan_eps=self.configs.dbscan_eps, 
+                                        dbscan_min_points=self.configs.dbscan_min_points, 
+                                        spatial_sim_type=self.configs.spatial_sim_type, 
+                                        device=self.configs.device
+                                        # Note: Removed 'match_method' and 'phys_bias' as they do not appear in the provided merge function
+                                        )
             map_edges = process_edges(match_indices, grounded_obs, len(objects), objects, map_edges)
 
             is_final_frame = frame_idx == len(self.dataset) - 1
