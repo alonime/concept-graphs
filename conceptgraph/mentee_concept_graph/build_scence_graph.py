@@ -108,9 +108,9 @@ class SceneGraphConfigs:
     wandb: bool = False
     "Log in wand indecator"
     build_visualization: Literal['rerun', 'open3d', 'none'] = 'rerun'
-    dataset_root = Path("/home/liora/Lior/Datasets/record3d")
-    scene_id= "workshop_smooth_depth_preprocessed"
-    dataset_config= "dataconfig.yaml"
+    dataset_root = Path("/home/liora/Lior/Datasets/svo")
+    scene_id= "workshop_new"
+    dataset_config= "transforms.json" #"dataconfig.yaml"
 
     classes_file = "conceptgraph/scannet200_classes.txt"
     bg_classes = ["wall", "floor", "ceiling"]
