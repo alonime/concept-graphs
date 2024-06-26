@@ -6,6 +6,7 @@ import dataclasses
 from typing import Literal
 import logging
 import datetime
+import json
 
 # Third-party imports
 import cv2
@@ -93,6 +94,7 @@ from conceptgraph.slam.mapping import (
 from conceptgraph.utils.model_utils import compute_clip_features_batched
 
 from conceptgraph.mentee_concept_graph.mentee_vlm import image_captioning
+from conceptgraph.mentee_concept_graph.svo_dataset import SVODataset
 
 
 # Disable torch gradient computation
@@ -103,14 +105,14 @@ class SceneGraphConfigs:
 
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
-    dataset_stride: int = 5
+    dataset_stride: int = 1
 
     wandb: bool = False
     "Log in wand indecator"
     build_visualization: Literal['rerun', 'open3d', 'none'] = 'rerun'
     dataset_root = Path("/home/liora/Lior/Datasets/svo")
     scene_id= "workshop_new"
-    dataset_config= "transforms.json" #"dataconfig.yaml"
+    dataset_config: Literal["transforms.json", "dataconfig.yaml"] = "transforms.json"
 
     classes_file = "conceptgraph/scannet200_classes.txt"
     bg_classes = ["wall", "floor", "ceiling"]
@@ -203,16 +205,26 @@ class SceneGraph:
 
     def init_dataset(self,):
          # Initialize the dataset
-        self.dataset = get_dataset(dataconfig=self.configs.dataset_root / self.configs.scene_id / self.configs.dataset_config, #TODO: @lior, refactor to dataset class
-                                   start=0,
-                                   end=-1,
-                                   stride=self.configs.dataset_stride,
-                                   basedir=self.configs.dataset_root,
-                                   sequence=self.configs.scene_id,
-                                   desired_height=self.dataset_config.camera_params.image_height,
-                                   desired_width=self.dataset_config.camera_params.image_width,
-                                   device="cpu",
-                                   dtype=torch.float)
+        with open(self.configs.dataset_root / self.configs.scene_id / self.configs.dataset_config, 'r') as file:
+            self.dataset_config = json.load(file)
+        self.dataset = SVODataset(config_dict=self.dataset_config,
+                                  start=0,
+                                  end=-1,
+                                  stride=self.configs.dataset_stride,
+                                  basedir=self.configs.dataset_root,
+                                  sequence=self.configs.scene_id,
+                                  device="cpu",
+                                  dtype=torch.float)
+        # self.dataset = get_dataset(dataconfig=self.configs.dataset_root / self.configs.scene_id / self.configs.dataset_config, #TODO: @lior, refactor to dataset class
+        #                            start=0,
+        #                            end=-1,
+        #                            stride=self.configs.dataset_stride,
+        #                            basedir=self.configs.dataset_root,
+        #                            sequence=self.configs.scene_id,
+        #                            desired_height=self.dataset_config.camera_params.image_height,
+        #                            desired_width=self.dataset_config.camera_params.image_width,
+        #                            device="cpu",
+        #                            dtype=torch.float)
         
     def init_models(self,):
         logging.info("Iinitazlize models:")

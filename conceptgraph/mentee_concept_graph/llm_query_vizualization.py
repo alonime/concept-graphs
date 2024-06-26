@@ -6,6 +6,9 @@ import os
 # pyqt_plugin_path = os.path.join(os.path.dirname(PyQt5.__file__), "Qt", "plugins", "platforms")
 # os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = pyqt_plugin_path
 
+import supervision as sv
+from supervision.draw.color import Color, ColorPalette
+
 import copy
 import json
 import os
@@ -22,6 +25,8 @@ import torch
 import torch.nn.functional as F
 import open_clip
 from openai import OpenAI
+import plotly.graph_objects as go
+import plotly.express as px
 
 import distinctipy
 
@@ -376,10 +381,18 @@ def main(args):
 
             for pcd in pcds:
                 vis.update_geometry(pcd)
+
+            box_annotator = sv.BoxAnnotator(color = ColorPalette.default(),
+                                            text_scale=0.3,
+                                            text_thickness=1,
+                                            text_padding=2,)
             
-            cv2.imshow('Image', cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR))
-            cv2.waitKey(0)
-            cv2.destroyAllWindows()
+            curr_det = sv.Detections(xyxy=objects[best_fits]['xyxy'][0][None, ...])
+            
+            annotated_image = box_annotator.annotate(scene=img, detections=curr_det)
+            fig = px.imshow(annotated_image)
+            fig.show()
+
 
 
         else:
