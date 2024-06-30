@@ -1080,7 +1080,6 @@ def make_detection_list_from_pcd_and_gobs(
             'pcd': obj_pcds_and_bboxes[mask_idx]['pcd'],
             'bbox': obj_pcds_and_bboxes[mask_idx]['bbox'],
             'clip_ft': to_tensor(gobs['image_feats'][mask_idx]),
-            # 'text_ft': to_tensor(gobs['text_feats'][mask_idx]),
             'caption': gobs['caption'][mask_idx],
             'num_obj_in_class': num_obj_in_class,
             'curr_obj_num': tracker.total_object_count,

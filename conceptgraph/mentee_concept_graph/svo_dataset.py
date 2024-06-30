@@ -83,11 +83,13 @@ class GradSLAMDataset(torch.utils.data.Dataset):
                 raise ValueError(
                     "Mismatch between number of color images and number of embedding files."
                 )
+            
         self.num_imgs = len(self.color_paths)
-        self.poses = self.load_poses()
         
         if self.end == -1:
             self.end = self.num_imgs
+            
+        self.poses = self.load_poses()
 
         self.color_paths = self.color_paths[self.start : self.end : stride]
         self.depth_paths = self.depth_paths[self.start : self.end : stride]
@@ -96,7 +98,12 @@ class GradSLAMDataset(torch.utils.data.Dataset):
         self.poses = self.poses[self.start : self.end : stride]
         # Tensor of retained indices (indices of frames and poses that were retained)
         self.retained_inds = torch.arange(self.num_imgs)[self.start : self.end : stride]
-        # Update self.num_images after subsampling the dataset
+
+        self.num_imgs = len(self.color_paths)
+        
+        if self.end == -1:
+            self.end = self.num_imgs
+
 
         # self.transformed_poses = datautils.poses_to_transforms(self.poses)
         self.poses = torch.stack(self.poses)

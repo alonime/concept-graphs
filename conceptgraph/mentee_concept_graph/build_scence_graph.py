@@ -7,6 +7,7 @@ from typing import Literal
 import logging
 import datetime
 import json
+import signal
 
 # Third-party imports
 import cv2
@@ -14,7 +15,6 @@ import numpy as np
 import torch
 from tqdm import trange
 from open3d.io import read_pinhole_camera_parameters
-import hydra
 import open_clip
 from ultralytics import YOLO, SAM
 import supervision as sv
@@ -105,13 +105,13 @@ class SceneGraphConfigs:
 
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
-    dataset_stride: int = 1
+    dataset_stride: int = 8
 
     wandb: bool = False
     "Log in wand indecator"
     build_visualization: Literal['rerun', 'open3d', 'none'] = 'rerun'
     dataset_root = Path("/home/liora/Lior/Datasets/svo")
-    scene_id= "workshop_new"
+    scene_id= "office_new"
     dataset_config: Literal["transforms.json", "dataconfig.yaml"] = "transforms.json"
 
     classes_file = "conceptgraph/scannet200_classes.txt"
@@ -120,7 +120,6 @@ class SceneGraphConfigs:
 
     render_camera_path: str = "conceptgraph/dataset/dataconfigs/record3d/record_3d_camera.json"
 
-
     detectoin_model: str = "yolov8l-world.pt"
     detection_threshold: float = 0.3
     segmentaion_model: str = "mobile_sam.pt"  # UltraLytics SAM
@@ -128,10 +127,11 @@ class SceneGraphConfigs:
     clip_pretrained: str = "laion2b_s32b_b79k"
 
     save_detections = True
+    filter_persons = True
 
     build_spetial_edges: bool = False
     mask_area_threshold: float = 25   # mask with pixel area less than this will be skipped
-    mask_conf_threshold: float =0.2   # mask with lower confidence score will be skipped
+    mask_conf_threshold: float = 0.2   # mask with lower confidence score will be skipped
     max_bbox_area_ratio: float = 1.0  # boxes with larger areas than this will be skipped
     min_points_threshold: int = 16    # projected and sampled pcd with less points will be skipped
     spatial_sim_type: Literal["iou", "giou", "overlap"] = "overlap" 
@@ -201,12 +201,12 @@ class SceneGraph:
         self.dataset_config_path = self.configs.dataset_root / self.configs.scene_id / self.configs.dataset_config
         self.dataset_config = OmegaConf.load(self.dataset_config_path)
 
+        self.objects, self.map_edges= None
+
 
 
     def init_dataset(self,):
          # Initialize the dataset
-        with open(self.configs.dataset_root / self.configs.scene_id / self.configs.dataset_config, 'r') as file:
-            self.dataset_config = json.load(file)
         self.dataset = SVODataset(config_dict=self.dataset_config,
                                   start=0,
                                   end=-1,
@@ -252,20 +252,20 @@ class SceneGraph:
 
         assert self.dataset is not None, "Dataset isn't initalize"
 
-        results_dir =  Path(self.configs.dataset_root) / self.configs.scene_id / "exps" / datetime.datetime.now().strftime("%Y_%m_%d_%H_%M")
-        results_dir_detections = results_dir / "detections"
-        results_dir_vis = results_dir / "vis"
-        resutls_dir_objects = results_dir / "saved_obj_all_frames"
+        self.results_dir =  Path(self.configs.dataset_root) / self.configs.scene_id / "exps" / f"reconstruction_stride_{self.configs.dataset_stride}"
+        self.results_dir_detections = self.results_dir / "detections"
+        self.results_dir_vis = self.results_dir / "vis"
+        self.resutls_dir_objects = self.results_dir / "saved_obj_all_frames"
         
-        results_dir_detections.mkdir(exist_ok=True, parents=True)
-        results_dir_vis.mkdir(exist_ok=True, parents=True)
-        resutls_dir_objects.mkdir(exist_ok=True, parents=True)
+        self.results_dir_detections.mkdir(exist_ok=True, parents=True)
+        self.results_dir_vis.mkdir(exist_ok=True, parents=True)
+        self.resutls_dir_objects.mkdir(exist_ok=True, parents=True)
 
 
-        logging.info(f"Save results in {results_dir}")
+        logging.info(f"Save results in {self.results_dir}")
 
-        objects = MapObjectList(device=self.configs.device)
-        map_edges = MapEdgeMapping(objects)
+        self.objects = MapObjectList(device=self.configs.device)
+        self.map_edges = MapEdgeMapping(self.objects)
 
         
         prev_adjusted_pose = None
@@ -328,7 +328,7 @@ class SceneGraph:
                                                                  curr_det, 
                                                                  self.obj_classes, 
                                                                  detection_class_labels, 
-                                                                 results_dir_vis, 
+                                                                 self.results_dir_vis, 
                                                                  rgb_path, 
                                                                  self.configs.build_spetial_edges, 
                                                                  self.openai_client)
@@ -369,7 +369,7 @@ class SceneGraph:
             # save the detections if needed
             if self.configs.save_detections:
 
-                vis_save_path = (results_dir_vis / rgb_path.name).with_suffix(".jpg")
+                vis_save_path = (self.results_dir_vis / rgb_path.name).with_suffix(".jpg")
                 # Visualize and save the annotated image
                 annotated_image, labels = vis_result_fast(image, curr_det, self.obj_classes.get_classes_arr())
                 cv2.imwrite(str(vis_save_path), annotated_image)
@@ -380,7 +380,7 @@ class SceneGraph:
                 annotated_depth_image, labels = vis_result_fast_on_depth(depth_image_rgb, curr_det, self.obj_classes.get_classes_arr())
                 cv2.imwrite(str(vis_save_path).replace(".jpg", "_depth.jpg"), annotated_depth_image)
                 cv2.imwrite(str(vis_save_path).replace(".jpg", "_depth_only.jpg"), depth_image_rgb)
-                save_detection_results(results_dir_detections / vis_save_path.stem, results)
+                save_detection_results(self.results_dir_detections / vis_save_path.stem, results)
         
             # get pose, this is the untrasformed pose.
             unt_pose = self.dataset.poses[frame_idx]
@@ -393,14 +393,14 @@ class SceneGraph:
                 prev_adjusted_pose = orr_log_camera(intrinsics,
                                                     adjusted_pose,
                                                     prev_adjusted_pose,
-                                                    self.dataset_config.camera_params.image_width,
-                                                    self.dataset_config.camera_params.image_height,
+                                                    self.dataset_config.w,
+                                                    self.dataset_config.h,
                                                     frame_idx)
                 orr_log_rgb_image(rgb_path)
                 orr_log_annotated_image(rgb_path, vis_save_path)
                 orr_log_depth_image(depth_tensor)
-                orr_log_vlm_image((results_dir_vis / rgb_path.name).with_suffix(".jpg"))
-                orr_log_vlm_image((results_dir_vis / rgb_path.name).with_suffix(".jpg"), label="w_edges")
+                orr_log_vlm_image((self.results_dir_vis / rgb_path.name).with_suffix(".jpg"))
+                orr_log_vlm_image((self.results_dir_vis / rgb_path.name).with_suffix(".jpg"), label="w_edges")
 
 
             # resize the observation if needed
@@ -459,8 +459,8 @@ class SceneGraph:
             # if no objects yet in the map,
             # just add all the objects from the current frame
             # then continue, no need to match or merge
-            if len(objects) == 0:
-                objects.extend(detection_list)
+            if len(self.objects) == 0:
+                self.objects.extend(detection_list)
                 self.tracker.increment_total_objects(len(detection_list))
                 if self.configs.wandb:
                     self.owandb.log({"total_objects_so_far": self.tracker.get_total_objects(),
@@ -471,11 +471,11 @@ class SceneGraph:
             spatial_sim = compute_spatial_similarities(
                 spatial_sim_type=self.configs.spatial_sim_type, 
                 detection_list=detection_list, 
-                objects=objects,
+                objects=self.objects,
                 downsample_voxel_size=self.configs.downsample_voxel_size
             )
 
-            visual_sim = compute_visual_similarities(detection_list, objects)
+            visual_sim = compute_visual_similarities(detection_list, self.objects)
 
             agg_sim = aggregate_similarities(match_method=self.configs.match_method, 
                                              phys_bias=self.configs.phys_bias, 
@@ -488,18 +488,18 @@ class SceneGraph:
                                                         detection_threshold=self.configs.sim_threshold)
 
             # Now merge the detected objects into the existing objects based on the match indices
-            objects = merge_obj_matches(detection_list=detection_list, 
-                                        objects=objects,
-                                        match_indices=match_indices,
-                                        downsample_voxel_size=self.configs.downsample_voxel_size, 
-                                        dbscan_remove_noise=self.configs.dbscan_remove_noise, 
-                                        dbscan_eps=self.configs.dbscan_eps, 
-                                        dbscan_min_points=self.configs.dbscan_min_points, 
-                                        spatial_sim_type=self.configs.spatial_sim_type, 
-                                        device=self.configs.device
-                                        # Note: Removed 'match_method' and 'phys_bias' as they do not appear in the provided merge function
-                                        )
-            map_edges = process_edges(match_indices, grounded_obs, len(objects), objects, map_edges)
+            self.objects = merge_obj_matches(detection_list=detection_list, 
+                                             objects=self.objects,
+                                             match_indices=match_indices,
+                                             downsample_voxel_size=self.configs.downsample_voxel_size, 
+                                             dbscan_remove_noise=self.configs.dbscan_remove_noise, 
+                                             dbscan_eps=self.configs.dbscan_eps, 
+                                             dbscan_min_points=self.configs.dbscan_min_points, 
+                                             spatial_sim_type=self.configs.spatial_sim_type, 
+                                             device=self.configs.device
+                                             # Note: Removed 'match_method' and 'phys_bias' as they do not appear in the provided merge function
+                                             )
+            self.map_edges = process_edges(match_indices, grounded_obs, len(self.objects), self.objects, self.map_edges)
 
             is_final_frame = frame_idx == len(self.dataset) - 1
             if is_final_frame:
@@ -513,13 +513,13 @@ class SceneGraph:
                                  frame_idx,  
                                  is_final_frame):
                 
-                objects = denoise_objects(downsample_voxel_size=self.configs.downsample_voxel_size, 
+                self.objects = denoise_objects(downsample_voxel_size=self.configs.downsample_voxel_size, 
                                           dbscan_remove_noise=self.configs.dbscan_remove_noise, 
                                           dbscan_eps=self.configs.dbscan_eps, 
                                           dbscan_min_points=self.configs.dbscan_min_points, 
                                           spatial_sim_type=self.configs.spatial_sim_type, 
                                           device=self.configs.device, 
-                                          objects=objects)
+                                          objects=self.objects)
 
             # Filtering
             if processing_needed(self.configs.filter_interval,
@@ -527,10 +527,10 @@ class SceneGraph:
                                  frame_idx,
                                  is_final_frame):
                 
-                objects = filter_objects(obj_min_points=self.configs.obj_min_points, 
+                self.objects = filter_objects(obj_min_points=self.configs.obj_min_points, 
                                          obj_min_detections=self.configs.obj_min_detections, 
-                                         objects=objects,
-                                         map_edges=map_edges)
+                                         objects=self.objects,
+                                         map_edges=self.map_edges)
 
             # Merging
             if processing_needed(self.configs.merge_interval,
@@ -538,10 +538,10 @@ class SceneGraph:
                                  frame_idx,
                                  is_final_frame):
                 
-                objects, map_edges = merge_objects(merge_overlap_thresh=self.configs.merge_overlap_thresh,
+                self.objects, self.map_edges = merge_objects(merge_overlap_thresh=self.configs.merge_overlap_thresh,
                                                    merge_visual_sim_thresh=self.configs.merge_visual_sim_thresh,
                                                    merge_text_sim_thresh=self.configs.merge_text_sim_thresh,
-                                                   objects=objects,
+                                                   objects=self.objects,
                                                    downsample_voxel_size=self.configs.downsample_voxel_size,
                                                    dbscan_remove_noise=self.configs.dbscan_remove_noise,
                                                    dbscan_eps=self.configs.dbscan_eps,
@@ -549,15 +549,15 @@ class SceneGraph:
                                                    spatial_sim_type=self.configs.spatial_sim_type,
                                                    device=self.configs.device,
                                                    do_edges=True,
-                                                   map_edges=map_edges)
+                                                   map_edges=self.map_edges)
                 
-            orr_log_objs_pcd_and_bbox(objects, self.obj_classes)
-            orr_log_edges(objects, map_edges, self.obj_classes)
+            orr_log_objs_pcd_and_bbox(self.objects, self.obj_classes)
+            orr_log_edges(self.objects, self.map_edges, self.obj_classes)
 
             if self.configs.save_detections:
-                save_objects_for_frame(resutls_dir_objects,
+                save_objects_for_frame(self.resutls_dir_objects,
                                        frame_idx,
-                                       objects,
+                                       self.objects,
                                        self.configs.obj_min_detections,
                                        adjusted_pose,
                                        rgb_path)
@@ -567,11 +567,11 @@ class SceneGraph:
                                  "counter": counter,
                                  "is_final_frame": is_final_frame,})
 
-            self.tracker.increment_total_objects(len(objects))
+            self.tracker.increment_total_objects(len(self.objects))
             self.tracker.increment_total_detections(len(detection_list))
             if self.configs.wandb:
                 self.owandb.log({"total_objects": self.tracker.get_total_objects(),
-                                 "objects_this_frame": len(objects),
+                                 "objects_this_frame": len(self.objects),
                                  "total_detections": self.tracker.get_total_detections(),
                                  "detections_this_frame": len(detection_list),
                                  "frame_idx": frame_idx,
@@ -581,18 +581,21 @@ class SceneGraph:
         # LOOP OVER -----------------------------------------------------
 
         # Save the pointcloud
+
+    def save_pcd(self,):
+
         save_pointcloud(exp_suffix="final_results",
-                        exp_out_path=results_dir,
+                        exp_out_path=self.results_dir,
                         cfg=dataclasses.asdict(self.configs),
-                        objects=objects,
+                        objects=self.objects,
                         obj_classes=self.obj_classes,
                         latest_pcd_filepath="latest_pcd_save.pcd",
                         create_symlink=True,
-                        edges=map_edges)
+                        edges=self.map_edges)
 
         # Save metadata if all frames are saved
         if self.configs.save_detections:
-            save_meta_path = resutls_dir_objects / f"meta.pkl.gz"
+            save_meta_path = self.resutls_dir_objects / f"meta.pkl.gz"
             with gzip.open(save_meta_path, "wb") as f:
                 pickle.dump({'cfg': dataclasses.asdict(self.configs),
                              'class_names': self.obj_classes.get_classes_arr(),
@@ -605,6 +608,8 @@ class SceneGraph:
         
 if __name__ == "__main__":
     scene_graph = SceneGraph()
+
+    signal.signal()
     scene_graph.init_dataset()
     scene_graph.init_models()
     scene_graph.build_scene()
