@@ -40,18 +40,10 @@ from conceptgraph.utils.logging_metrics import DenoisingTracker, MappingTracker
 from conceptgraph.utils.vlm import get_obj_rel_from_image_gpt4v
 from conceptgraph.utils.ious import mask_subtract_contained
 from conceptgraph.utils.general_utils import (
-    ObjectClasses, 
-    find_existing_image_path, 
-    get_det_out_path, 
-    get_exp_out_path, 
-    get_vlm_annotated_image_path, 
-    handle_rerun_saving, 
     load_saved_detections, 
     load_saved_hydra_json_config, 
     make_vlm_edges, 
-    measure_time, 
-    save_detection_results, 
-    save_hydra_config, 
+    save_detection_results,
     save_objects_for_frame, 
     save_pointcloud, 
     should_exit_early, 
@@ -78,7 +70,6 @@ from conceptgraph.slam.utils import (
     merge_objects, 
     detections_to_obj_pcd_and_bbox,
     prepare_objects_save_vis,
-    process_cfg,
     process_edges,
     process_pcd,
     processing_needed,
@@ -111,14 +102,12 @@ class SceneGraphConfigs:
     "Log in wand indecator"
     build_visualization: Literal['rerun', 'open3d', 'none'] = 'rerun'
     dataset_root = Path("/home/liora/Lior/Datasets/svo")
-    scene_id= "office_new"
+    scene_id= "robot_walking"
     dataset_config: Literal["transforms.json", "dataconfig.yaml"] = "transforms.json"
 
     classes_file = "conceptgraph/scannet200_classes.txt"
     bg_classes = ["wall", "floor", "ceiling"]
     skip_bg: bool = False
-
-    render_camera_path: str = "conceptgraph/dataset/dataconfigs/record3d/record_3d_camera.json"
 
     detectoin_model: str = "yolov8l-world.pt"
     detection_threshold: float = 0.3
@@ -127,6 +116,7 @@ class SceneGraphConfigs:
     clip_pretrained: str = "laion2b_s32b_b79k"
 
     save_detections = True
+    load_detections = True
     filter_persons = True
 
     build_spetial_edges: bool = False
@@ -167,7 +157,6 @@ class SceneGraphConfigs:
     # Selection criteria of the fused object point cloud
     obj_min_points: int = 0
     obj_min_detections: int = 3
-
 
 
 
@@ -333,7 +322,6 @@ class SceneGraph:
                                                                  self.configs.build_spetial_edges, 
                                                                  self.openai_client)
 
-            #TODO: move it to the end            
             image_crops, image_feats, text_feats = compute_clip_features_batched(image_rgb, 
                                                                                  curr_det, 
                                                                                  self.clip_model, 
@@ -364,8 +352,6 @@ class SceneGraph:
                 "edges": edges,
             }
 
-            raw_grounded_obs = results
-
             # save the detections if needed
             if self.configs.save_detections:
 
@@ -381,6 +367,9 @@ class SceneGraph:
                 cv2.imwrite(str(vis_save_path).replace(".jpg", "_depth.jpg"), annotated_depth_image)
                 cv2.imwrite(str(vis_save_path).replace(".jpg", "_depth_only.jpg"), depth_image_rgb)
                 save_detection_results(self.results_dir_detections / vis_save_path.stem, results)
+
+
+            raw_grounded_obs = results
         
             # get pose, this is the untrasformed pose.
             unt_pose = self.dataset.poses[frame_idx]
