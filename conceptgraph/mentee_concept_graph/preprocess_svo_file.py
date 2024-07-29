@@ -1,170 +1,52 @@
-"""
-Preprocess an unzipped .r3d file to the Record3DDataset format with adjusted image resolution.
-"""
 
+import cv2 
 import glob
-import json
 import os
-import cv2
-import liblzfse
-import numpy as np
-import png
-import tyro
-import yaml
-from dataclasses import dataclass
-from pathlib import Path
 from PIL import Image
-from scipy.spatial.transform import Rotation
-from tqdm import tqdm, trange
-from typing import List, Tuple, Union
-from natsort import natsorted
+from tqdm import tqdm
+import numpy as np
 from pathlib import Path
+import shutil
 
-@dataclass
-class ProgramArgs:
-    datapath = "/home/liora/Lior/Datasets/svo/office_new"
-    output_dir = None  # Optional, set dynamically if not provided
+import plotly.graph_objects as go
 
-# desired_width = 1440
-# desired_height = 1920
-
-def load_depth(filepath):
-    with open(filepath, 'rb') as depth_fh:
-        raw_bytes = depth_fh.read()
-        decompressed_bytes = liblzfse.decompress(raw_bytes)
-        depth_img = np.frombuffer(decompressed_bytes, dtype=np.float32)
-        depth_img = depth_img.reshape((256, 192))  # Original resolution
-        depth_img = resize_depth(depth_img, desired_width, desired_height)
-    return depth_img
-
-def load_conf(filepath):
-    with open(filepath, 'rb') as conf_fh:
-        raw_bytes = conf_fh.read()
-        decompressed_bytes = liblzfse.decompress(raw_bytes)
-        conf_img = np.frombuffer(decompressed_bytes, dtype=np.uint8)
-        conf_img = conf_img.reshape((256, 192))  # Original resolution
-        conf_img = resize_depth(conf_img, desired_width, desired_height)  # Using the same resizing function as depth
-    return conf_img
-
-def load_color(filepath):
-    img = cv2.imread(filepath)
-    resized_img = cv2.resize(img, (desired_width, desired_height), interpolation=cv2.INTER_LINEAR)
-    return resized_img
-
-def resize_depth(depth_img, desired_width, desired_height):
-    return cv2.resize(depth_img, (desired_width, desired_height), interpolation=cv2.INTER_NEAREST)
-
-def write_color(outpath, img):
-    cv2.imwrite(outpath, img)
-
-def write_depth(outpath, depth):
-    depth = depth * 1000
-    depth = depth.astype(np.uint16)
-    depth = Image.fromarray(depth)
-    depth.save(outpath)
-
-def write_conf(outpath, conf):
-    np.save(outpath, conf)
-
-def write_conf_img(outpath, conf):
-    conf_img = Image.fromarray(conf)
-    conf_img.save(outpath)
-
-def write_pose(outpath, pose):
-    np.save(outpath, pose.astype(np.float32))
-
-# The rest of your functions like get_poses and get_intrinsics remain unchanged
-
-def get_poses(metadata_dict: dict) -> int:
-    """Converts Record3D's metadata dict into pose matrices needed by nerfstudio
-    Args:
-        metadata_dict: Dict containing Record3D metadata
-    Returns:
-        np.array of pose matrices for each image of shape: (num_images, 4, 4)
-    """
-
-    poses_data = [np.array(frame['transform_matrix']) for frame in metadata_dict['frames']]
+def detect_blur_images(data_path):
+    color_paths = glob.glob(os.path.join(data_path, "images", "*.png"))
+    vars = []
+    for img_path in tqdm(color_paths):
+        image = cv2.imread(str(img_path)) 
+        image_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        lap_var = cv2.Laplacian(image_gray, cv2.CV_64F).var()
+        vars.append(lap_var)
     
-    return np.stack(poses_data)
+    fig = go.Figure(data=[go.Histogram(x=vars)])
+    fig.show()
 
+    thershold = 100
+    vars_np = np.array(vars)
+    vaild_images = [Path(color_paths[idx]) for idx in np.where(vars_np > thershold)[0]]
 
-def get_intrinsics(metadata_dict: dict) -> int:
-    """Converts Record3D metadata dict into intrinsic info needed by nerfstudio
-    Args:
-        metadata_dict: Dict containing Record3D metadata
-
-    Returns:
-        dict with camera intrinsics keys needed by nerfstudio
-    """
-
-    intrinsics_dict = {
-        "fx": metadata_dict['fl_x'],
-        "fy": metadata_dict['fl_y'],
-        "cx": metadata_dict['cx'],
-        "cy": metadata_dict['cy'],
-        "w": metadata_dict['w'],
-        "h": metadata_dict['h'],
-    }
-
-    return intrinsics_dict
-
-def main():
-    args = tyro.cli(ProgramArgs)
-    
-    metadata = None
-    with open(os.path.join(args.datapath, "transforms.json"), "r") as f:
-        metadata = json.load(f)
-        
-    # If output_dir is not specified, set it to a "preprocessed" folder inside datapath parent folder
-    if args.output_dir is None:
-        datapath = Path(args.datapath)
-        args.output_dir = str(datapath.parent / (datapath.name + "_preprocessed"))
-    
-    print(f"Preprocessing Record3D data from \n{args.datapath} to \n{args.output_dir}")
-
-    original_width, original_height = metadata['w'], metadata['h'] # Original resolution for scaling intrinsics
-    poses = get_poses(metadata)
-    intrinsics_dict = get_intrinsics(metadata)
-    
-    color_paths = natsorted(glob.glob(os.path.join(args.datapath, "images", "*.png")))
-    depth_paths = natsorted(glob.glob(os.path.join(args.datapath, "depth_neural_plus_meter", "*.npy")))
-
-    # Modify paths in os.makedirs to use args.output_dir
-    os.makedirs(os.path.join(args.output_dir, "rgb"), exist_ok=True)
-    os.makedirs(os.path.join(args.output_dir, "depth"), exist_ok=True)
-    os.makedirs(os.path.join(args.output_dir, "poses"), exist_ok=True)
+    new_dir = Path("/home/liora/Lior/Datasets/svo/robot_walking" + "_clean")
+    new_dir.mkdir(exist_ok=True, parents=True)
+    image_dir = new_dir / "images"
+    depth_dir =  new_dir / "depth_neural_plus_meter"
+    image_dir.mkdir(exist_ok=True, parents=True)
+    depth_dir.mkdir(exist_ok=True, parents=True)
 
 
 
-    cfg = {
-        "dataset_name": "record3d",
-        "camera_params": {
-            "image_height": intrinsics_dict["h"],
-            "image_width": intrinsics_dict["w"],
-            "fx": intrinsics_dict["fx"].item(),
-            "fy": intrinsics_dict["fy"].item(),
-            "cx": intrinsics_dict["cx"].item(),
-            "cy": intrinsics_dict["cy"].item(),
-            }
-        }
+    for path_img in vaild_images:
+        image_name = f"{path_img.stem}{path_img.suffix}"
+        depth_name = f"{path_img.stem}.npy"
+        depth_path = path_img.parent.parent / "depth_neural_plus_meter" / depth_name
 
-    with open(os.path.join(args.output_dir, "dataconfig.yaml"), "w") as f:
-        yaml.dump(cfg, f)
+        shutil.copy(path_img, image_dir / image_name)
+        shutil.copy(depth_path, depth_dir / depth_name)
 
-    for i in trange(len(color_paths)):
-        color = load_color(color_paths[i])
-        depth = load_depth(depth_paths[i])
-        
-        basename = os.path.splitext(os.path.basename(color_paths[i]))[0]
-        # color_path = os.path.splitext(os.path.basename(color_paths[i]))[0] + ".png"
-        write_color(os.path.join(args.output_dir, "rgb", basename + ".png"), color)
-        # depth_path = os.path.splitext(os.path.basename(depth_paths[i]))[0] + ".png"
-        write_depth(os.path.join(args.output_dir, "depth", basename + ".png"), depth)
-        # conf_path = os.path.splitext(os.path.basename(conf_paths[i]))[0] + ".npy"
-        write_conf(os.path.join(args.output_dir, "conf", basename + ".npy"), conf)
-        write_conf_img(os.path.join(args.output_dir, "conf_images", basename + ".png"), conf)
-        write_pose(os.path.join(args.output_dir, "poses", basename + ".npy"), poses[i])
-        write_depth(os.path.join(args.output_dir, "high_conf_depth", basename + ".png"), high_conf_depth)
+
+
+
 
 if __name__ == "__main__":
-    main()
+    data_path = "/home/liora/Lior/Datasets/svo/robot_walking"
+    detect_blur_images(data_path)

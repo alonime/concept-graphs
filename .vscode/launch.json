@@ -4,6 +4,7 @@
     // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
     "configurations": [
+        
         {
             "name": "Python Debugger: Current File",
             "type": "debugpy",
@@ -40,6 +41,15 @@
             "justMyCode": false
         },
         {
+            "name": "Mentee Mapping",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/conceptgraph/mentee_concept_graph/build_scence_graph.py",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false
+        },
+        {
             "name": "iPhone Record3D Stream Rerun Realtime Mapping",
             "type": "debugpy",
             "request": "launch",
@@ -55,10 +65,78 @@
             "program": "${workspaceFolder}/conceptgraph/scripts/visualize_cfslam_results.py",
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
+            "args": [ 
+                "--result_path",
+                // "${workspaceFolder}/latest_pcd_save" // change this to the path of the pcd file you want to visualize
+                "${workspaceFolder}/latest_pcd_save" // change this to the path of the pcd file you want to visualize
+
+            ],
+            "justMyCode": false
+        },
+        {
+            "name": "Mentee Visualize & Query Map",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/conceptgraph/mentee_concept_graph/llm_query_vizualization.py",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
             "args": [
                 "--result_path",
-                "${workspaceFolder}/latest_pcd_save" // change this to the path of the pcd file you want to visualize
+                "/home/liora/Lior/Datasets/svo/office_60fps_skip_8/exps/reconstruction_stride_2/pcd_final_results.pkl.gz",
+                ],
+            "justMyCode": false
+        },
+        {
+            "name": "build graph",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/conceptgraph/scripts/generate_gsa_results.py",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "args": [
+                "--dataset_root", "/home/liora/Lior/Datasets/Replica",
+                "--dataset_config", "/home/liora/Lior/concept-graphs/conceptgraph/dataset/dataconfigs/replica/replica.yaml",
+                "--scene_id", "room0",
+                "--class_set", "none",
+                // "--box_threshold", "0.2",
+                // "--text_threshold", "0.2",
+                "--stride", "5",
+                // "--add_bg_classes",
+                // "--accumu_classes",
+                // "--exp_suffix", "withbg_allclass",
             ],
+            "env": {"SCENE_NAME": "room0",
+                    "CUDA_VISIBLE_DEVICES": "0",
+                    "REPLICA_ROOT": "/home/liora/Lior/Datasets/Replica",
+                    "CG_FOLDER": "/home/liora/Lior/concept-graphs",
+                    "REPLICA_CONFIG_PATH": "/home/liora/Lior/concept-graphs/conceptgraph/dataset/dataconfigs/replica/replica.yaml",
+                    "LLAVA_PYTHON_PATH": "/home/liora/Lior/clones/LLaVA",
+                    "GSA_PATH": "/home/liora/Lior/clones/Grounded-Segment-Anything",
+                    },
+            "justMyCode": false
+        },
+
+        {
+            "name": "origin image captions",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/conceptgraph/scripts/generate_gsa_results.py",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "args": [
+                "--mode", "extract-node-captions",
+                "--cachedir", "${REPLICA_ROOT}/${SCENE_NAME}/sg_cache",
+                "--mapfile", "${REPLICA_ROOT}/${SCENE_NAME}/pcd_saves/${PKL_FILENAME}",
+                "--class_names_file", "${REPLICA_ROOT}/${SCENE_NAME}/gsa_classes_ram_withbg_allclasses.json",
+            ],
+            "env": {"SCENE_NAME": "room0",
+                    "CUDA_VISIBLE_DEVICES": "0",
+                    "REPLICA_ROOT": "/home/liora/Lior/Datasets/Replica",
+                    "CG_FOLDER": "/home/liora/Lior/concept-graphs",
+                    "REPLICA_CONFIG_PATH": "/home/liora/Lior/concept-graphs/conceptgraph/dataset/dataconfigs/replica/replica.yaml",
+                    "LLAVA_PYTHON_PATH": "/home/liora/Lior/clones/LLaVA",
+                    "GSA_PATH": "/home/liora/Lior/clones/Grounded-Segment-Anything",
+                    },
             "justMyCode": false
         },
 

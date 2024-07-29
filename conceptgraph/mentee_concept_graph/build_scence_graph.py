@@ -5,9 +5,7 @@ import gzip
 import dataclasses
 from typing import Literal
 import logging
-import datetime
 import json
-import signal
 
 # Third-party imports
 import cv2
@@ -40,8 +38,8 @@ from conceptgraph.utils.logging_metrics import DenoisingTracker, MappingTracker
 from conceptgraph.utils.vlm import get_obj_rel_from_image_gpt4v
 from conceptgraph.utils.ious import mask_subtract_contained
 from conceptgraph.utils.general_utils import (
+    ObjectClasses, 
     load_saved_detections, 
-    load_saved_hydra_json_config, 
     make_vlm_edges, 
     save_detection_results,
     save_objects_for_frame, 
@@ -96,14 +94,16 @@ class SceneGraphConfigs:
 
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
-    dataset_stride: int = 8
+    dataset_stride: int = 2
+    clip_depth: float = 5.0 #meter
 
     wandb: bool = False
     "Log in wand indecator"
     build_visualization: Literal['rerun', 'open3d', 'none'] = 'rerun'
     dataset_root = Path("/home/liora/Lior/Datasets/svo")
-    scene_id= "robot_walking"
+    scene_id= "office_60fps_skip_8_hloc"
     dataset_config: Literal["transforms.json", "dataconfig.yaml"] = "transforms.json"
+    localization_format: Literal["colmap", "odom"] = "colmap"
 
     classes_file = "conceptgraph/scannet200_classes.txt"
     bg_classes = ["wall", "floor", "ceiling"]
@@ -156,8 +156,7 @@ class SceneGraphConfigs:
 
     # Selection criteria of the fused object point cloud
     obj_min_points: int = 0
-    obj_min_detections: int = 3
-
+    obj_min_detections: int = 2
 
 
 class SceneGraph:
@@ -190,7 +189,7 @@ class SceneGraph:
         self.dataset_config_path = self.configs.dataset_root / self.configs.scene_id / self.configs.dataset_config
         self.dataset_config = OmegaConf.load(self.dataset_config_path)
 
-        self.objects, self.map_edges= None
+        self.objects, self.map_edges= None, None
 
 
 
@@ -203,7 +202,12 @@ class SceneGraph:
                                   basedir=self.configs.dataset_root,
                                   sequence=self.configs.scene_id,
                                   device="cpu",
-                                  dtype=torch.float)
+                                  dtype=torch.float,
+                                  image_suffix='png',
+                                  depth_suffix='npy',
+                                  scale_depth=True,
+                                  clip_depth=self.configs.clip_depth
+                                  )
         # self.dataset = get_dataset(dataconfig=self.configs.dataset_root / self.configs.scene_id / self.configs.dataset_config, #TODO: @lior, refactor to dataset class
         #                            start=0,
         #                            end=-1,
@@ -256,6 +260,10 @@ class SceneGraph:
         self.objects = MapObjectList(device=self.configs.device)
         self.map_edges = MapEdgeMapping(self.objects)
 
+
+        results_keys = ["xyxy", "confidence", "class_id", "mask", "classes", "image_crops", 
+                        "image_feats", "text_feats", "detection_class_labels", "labels", "edges", "caption"]
+
         
         prev_adjusted_pose = None
 
@@ -286,87 +294,109 @@ class SceneGraph:
             image = cv2.imread(str(rgb_path)) 
             image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
-            # Do initial object detection
-            results = self.detection_model.predict(rgb_path, conf=self.configs.detection_threshold, verbose=False)
-            confidences = results[0].boxes.conf.cpu().numpy()
-            detection_class_ids = results[0].boxes.cls.cpu().numpy().astype(int)
-            detection_class_labels = [f"{self.obj_classes.get_classes_arr()[class_id]} {class_idx}" for class_idx, class_id in enumerate(detection_class_ids)]
-            xyxy_tensor = results[0].boxes.xyxy
-            xyxy_np = xyxy_tensor.cpu().numpy()
+            vis_save_path = (self.results_dir_vis / rgb_path.name).with_suffix(".jpg")
 
-            # if there are detections, use segmentaion model
-            if xyxy_tensor.numel() != 0:
-                sam_out = self.segmentaion_model.predict(rgb_path, bboxes=xyxy_tensor, verbose=False)
-                masks_tensor = sam_out[0].masks.data
+            load_detection_successful = False
+            if self.configs.load_detections:
+                try:
+                    results = load_saved_detections(self.results_dir_detections / vis_save_path.stem)
+                    load_detection_successful = np.all([key in results.keys() for key in results_keys])
+                except:
+                    load_detection_successful = False
 
-                masks_np = masks_tensor.cpu().numpy()
-            else:
-                masks_np = np.empty((0, *rgb_tensor.shape[:2]), dtype=np.float64)
+                
+            if not load_detection_successful:
+                # Do initial object detection
+                results = self.detection_model.predict(rgb_path, conf=self.configs.detection_threshold, verbose=False)
+                if self.configs.filter_persons:
+                    non_persons_idx = np.where([self.obj_classes.get_classes_arr()[class_id] != 'person'
+                                       for class_idx, class_id in enumerate(results[0].boxes.cls.cpu().numpy().astype(int))])[0]
+                    
+                confidences = results[0].boxes.conf[non_persons_idx].cpu().numpy()
+                detection_class_ids = results[0].boxes.cls[non_persons_idx].cpu().numpy().astype(int)
+                detection_class_labels = [f"{self.obj_classes.get_classes_arr()[class_id]} {class_idx}" for class_idx, class_id in enumerate(detection_class_ids)]
+                xyxy_tensor = results[0].boxes.xyxy[non_persons_idx]
+                xyxy_np = xyxy_tensor.cpu().numpy()
 
-            # Create a detections object that we will save later
-            curr_det = sv.Detections(
-                xyxy=xyxy_np,
-                confidence=confidences,
-                class_id=detection_class_ids,
-                mask=masks_np,
-            )
-            
+                # if there are detections, use segmentaion model
+                if xyxy_tensor.numel() != 0:
+                    sam_out = self.segmentaion_model.predict(rgb_path, bboxes=xyxy_tensor, verbose=False)
+                    masks_tensor = sam_out[0].masks.data
 
-            # Make the edges
-            labels, edges, edge_image = make_vlm_edges(image, 
-                                                                 curr_det, 
-                                                                 self.obj_classes, 
-                                                                 detection_class_labels, 
-                                                                 self.results_dir_vis, 
-                                                                 rgb_path, 
-                                                                 self.configs.build_spetial_edges, 
-                                                                 self.openai_client)
+                    masks_np = masks_tensor.cpu().numpy()
+                else:
+                    masks_np = np.empty((0, *rgb_tensor.shape[:2]), dtype=np.float64)
 
-            image_crops, image_feats, text_feats = compute_clip_features_batched(image_rgb, 
-                                                                                 curr_det, 
-                                                                                 self.clip_model, 
-                                                                                 self.clip_preprocess, 
-                                                                                 self.clip_tokenizer, 
-                                                                                 self.obj_classes.get_classes_arr(), 
-                                                                                 self.configs.device)
-            
+                # Create a detections object that we will save later
+                curr_det = sv.Detections(
+                    xyxy=xyxy_np,
+                    confidence=confidences,
+                    class_id=detection_class_ids,
+                    mask=masks_np,
+                )
+                
+
+                # Make the edges
+                if len(curr_det) > 1:
+                    labels, edges, edge_image = make_vlm_edges(image, 
+                                                            curr_det, 
+                                                            self.obj_classes, 
+                                                            detection_class_labels, 
+                                                            self.results_dir_vis, 
+                                                            rgb_path, 
+                                                            self.configs.build_spetial_edges, 
+                                                            self.openai_client)
+                else: 
+                    labels, edges, edge_image = [], [], []
+
+                if len(curr_det):
+                    image_crops, image_feats, text_feats = compute_clip_features_batched(image_rgb, 
+                                                                                        curr_det, 
+                                                                                        self.clip_model, 
+                                                                                        self.clip_preprocess, 
+                                                                                        self.clip_tokenizer, 
+                                                                                        self.obj_classes.get_classes_arr(), 
+                                                                                        self.configs.device)
+                else:
+                    image_crops, image_feats, text_feats = [], [], []
+                    
+                
 
 
-            # increment total object detections
-            self.tracker.increment_total_detections(len(curr_det.xyxy))
+                # increment total object detections
+                self.tracker.increment_total_detections(len(curr_det.xyxy))
 
-            # Save results
-            # Convert the detections to a dict. The elements are in np.array
-            results = {
-                # add new uuid for each detection 
-                "xyxy": curr_det.xyxy,
-                "confidence": curr_det.confidence,
-                "class_id": curr_det.class_id,
-                "mask": curr_det.mask,
-                "classes": self.obj_classes.get_classes_arr(),
-                "image_crops": image_crops,
-                "image_feats": image_feats,
-                "text_feats": text_feats,
-                "detection_class_labels": detection_class_labels,
-                "labels": labels,
-                "edges": edges,
-            }
+                # Save results
+                # Convert the detections to a dict. The elements are in np.array
+                results = {
+                    # add new uuid for each detection 
+                    "xyxy": curr_det.xyxy,
+                    "confidence": curr_det.confidence,
+                    "class_id": curr_det.class_id,
+                    "mask": curr_det.mask,
+                    "classes": self.obj_classes.get_classes_arr(),
+                    "image_crops": image_crops,
+                    "image_feats": image_feats,
+                    "text_feats": text_feats,
+                    "detection_class_labels": detection_class_labels,
+                    "labels": labels,
+                    "edges": edges,
+                }
 
-            # save the detections if needed
-            if self.configs.save_detections:
+                # save the detections if needed
+                if self.configs.save_detections:
 
-                vis_save_path = (self.results_dir_vis / rgb_path.name).with_suffix(".jpg")
-                # Visualize and save the annotated image
-                annotated_image, labels = vis_result_fast(image, curr_det, self.obj_classes.get_classes_arr())
-                cv2.imwrite(str(vis_save_path), annotated_image)
+                    # Visualize and save the annotated image
+                    annotated_image, labels = vis_result_fast(image, curr_det, self.obj_classes.get_classes_arr())
+                    cv2.imwrite(str(vis_save_path), annotated_image)
 
-                depth_image_rgb = cv2.normalize(depth_array, None, 0, 255, cv2.NORM_MINMAX)
-                depth_image_rgb = depth_image_rgb.astype(np.uint8)
-                depth_image_rgb = cv2.cvtColor(depth_image_rgb, cv2.COLOR_GRAY2BGR)
-                annotated_depth_image, labels = vis_result_fast_on_depth(depth_image_rgb, curr_det, self.obj_classes.get_classes_arr())
-                cv2.imwrite(str(vis_save_path).replace(".jpg", "_depth.jpg"), annotated_depth_image)
-                cv2.imwrite(str(vis_save_path).replace(".jpg", "_depth_only.jpg"), depth_image_rgb)
-                save_detection_results(self.results_dir_detections / vis_save_path.stem, results)
+                    depth_image_rgb = cv2.normalize(depth_array, None, 0, 255, cv2.NORM_MINMAX)
+                    depth_image_rgb = depth_image_rgb.astype(np.uint8)
+                    depth_image_rgb = cv2.cvtColor(depth_image_rgb, cv2.COLOR_GRAY2BGR)
+                    annotated_depth_image, labels = vis_result_fast_on_depth(depth_image_rgb, curr_det, self.obj_classes.get_classes_arr())
+                    cv2.imwrite(str(vis_save_path).replace(".jpg", "_depth.jpg"), annotated_depth_image)
+                    cv2.imwrite(str(vis_save_path).replace(".jpg", "_depth_only.jpg"), depth_image_rgb)
+                    save_detection_results(self.results_dir_detections / vis_save_path.stem, results)
 
 
             raw_grounded_obs = results
@@ -412,29 +442,34 @@ class SceneGraph:
             grounded_obs['mask'] = mask_subtract_contained(grounded_obs['xyxy'], grounded_obs['mask'])
 
             obj_pcds_and_bboxes = detections_to_obj_pcd_and_bbox(depth_array=depth_array,
-                                                                 masks=grounded_obs['mask'],
-                                                                 cam_K=intrinsics.cpu().numpy()[:3, :3],  # Camera intrinsics
-                                                                 image_rgb=image_rgb,
-                                                                 trans_pose=adjusted_pose,
-                                                                 min_points_threshold=self.configs.min_points_threshold,
-                                                                 spatial_sim_type=self.configs.spatial_sim_type,
-                                                                 obj_pcd_max_points=self.configs.obj_pcd_max_points,
-                                                                 device=self.configs.device)
+                                                                masks=grounded_obs['mask'],
+                                                                cam_K=intrinsics.cpu().numpy()[:3, :3],  # Camera intrinsics
+                                                                image_rgb=image_rgb,
+                                                                trans_pose=adjusted_pose,
+                                                                min_points_threshold=self.configs.min_points_threshold,
+                                                                spatial_sim_type=self.configs.spatial_sim_type,
+                                                                obj_pcd_max_points=self.configs.obj_pcd_max_points,
+                                                                device=self.configs.device)
 
             for obj in obj_pcds_and_bboxes:
                 if obj:
                     obj["pcd"] = init_process_pcd(pcd=obj["pcd"],
-                                                  downsample_voxel_size=self.configs.downsample_voxel_size,
-                                                  dbscan_remove_noise=self.configs.dbscan_remove_noise,
-                                                  dbscan_eps=self.configs.dbscan_eps,
-                                                  dbscan_min_points=self.configs.dbscan_min_points,)
+                                                downsample_voxel_size=self.configs.downsample_voxel_size,
+                                                dbscan_remove_noise=self.configs.dbscan_remove_noise,
+                                                dbscan_eps=self.configs.dbscan_eps,
+                                                dbscan_min_points=self.configs.dbscan_min_points,)
                     
                     obj["bbox"] = get_bounding_box(spatial_sim_type=self.configs.spatial_sim_type, 
-                                                   pcd=obj["pcd"])
+                                                pcd=obj["pcd"])
                     
-            
-            captions_crops, detections_captions = image_captioning(image_rgb, self.openai_client, grounded_obs, obj_pcds_and_bboxes)
-            grounded_obs['caption'] = detections_captions
+            # if 'caption' not in grounded_obs.keys():
+            #     captions_crops, detections_captions = image_captioning(image_rgb, self.openai_client, grounded_obs, obj_pcds_and_bboxes)
+            #     grounded_obs['caption'] = detections_captions
+            #     if self.configs.save_detections and not load_detection_successful:
+                    
+            #         with gzip.open(f"{self.results_dir_detections / vis_save_path.stem}/caption.pkl.gz", "wb") as f:
+            #             pickle.dump(detections_captions, f)
+
 
             detection_list = make_detection_list_from_pcd_and_gobs(obj_pcds_and_bboxes, 
                                                                    grounded_obs, 
@@ -488,7 +523,7 @@ class SceneGraph:
                                              device=self.configs.device
                                              # Note: Removed 'match_method' and 'phys_bias' as they do not appear in the provided merge function
                                              )
-            self.map_edges = process_edges(match_indices, grounded_obs, len(self.objects), self.objects, self.map_edges)
+            # self.map_edges = process_edges(match_indices, grounded_obs, len(self.objects), self.objects, self.map_edges)
 
             is_final_frame = frame_idx == len(self.dataset) - 1
             if is_final_frame:
@@ -537,11 +572,11 @@ class SceneGraph:
                                                    dbscan_min_points=self.configs.dbscan_min_points,
                                                    spatial_sim_type=self.configs.spatial_sim_type,
                                                    device=self.configs.device,
-                                                   do_edges=True,
+                                                   do_edges=False,
                                                    map_edges=self.map_edges)
                 
             orr_log_objs_pcd_and_bbox(self.objects, self.obj_classes)
-            orr_log_edges(self.objects, self.map_edges, self.obj_classes)
+            # orr_log_edges(self.objects, self.map_edges, self.obj_classes)
 
             if self.configs.save_detections:
                 save_objects_for_frame(self.resutls_dir_objects,
@@ -598,7 +633,7 @@ class SceneGraph:
 if __name__ == "__main__":
     scene_graph = SceneGraph()
 
-    signal.signal()
     scene_graph.init_dataset()
     scene_graph.init_models()
     scene_graph.build_scene()
+    scene_graph.save_pcd()

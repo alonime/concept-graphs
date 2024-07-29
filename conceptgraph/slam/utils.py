@@ -791,10 +791,7 @@ def merge_objects(
         
         # now update all the edge indices using the index_updates, how?
 
-    if do_edges:
-        return objects, map_edges
-    else:
-        return objects
+    return objects, map_edges
 
 
 # @profile
@@ -1080,19 +1077,13 @@ def make_detection_list_from_pcd_and_gobs(
             'pcd': obj_pcds_and_bboxes[mask_idx]['pcd'],
             'bbox': obj_pcds_and_bboxes[mask_idx]['bbox'],
             'clip_ft': to_tensor(gobs['image_feats'][mask_idx]),
-            'caption': gobs['caption'][mask_idx],
+            # 'caption': gobs['caption'][mask_idx],
             'num_obj_in_class': num_obj_in_class,
             'curr_obj_num': tracker.total_object_count,
             'new_counter' : tracker.brand_new_counter,
         }
-        # detected_object['curr_obj_num']
-        # print(f"Line 969, detected_object['image_idx']: {detected_object['image_idx']}")
-        # print(f"Line 971, detected_object['class_name']: {detected_object['class_name']}")
-        # print(f"Line 966, detected_object['curr_obj_num']: {detected_object['curr_obj_num']}")
-        
-        # if is_bg_object:
-        #     bg_detection_list.append(detected_object)
-        # else:
+
+
         detection_list.append(detected_object)
         
         tracker.curr_class_count[curr_class_name] += 1
@@ -1342,6 +1333,8 @@ def     prepare_objects_save_vis(objects: MapObjectList, downsample_size: float=
 def process_edges(match_indices, gobs, initial_objects_count, objects, map_edges):
     # Step 1: Generate match_indices_w_new_obj with indices for new objects
     # Initial count of objects before processing new detections
+    if len(map_edges) == 0:
+        return map_edges
     new_object_count = 0  # Counter for new objects
 
     # Create a list of match indices with new objects index instead of None

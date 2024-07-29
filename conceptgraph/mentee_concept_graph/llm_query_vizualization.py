@@ -26,6 +26,7 @@ import torch.nn.functional as F
 import open_clip
 from openai import OpenAI
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import plotly.express as px
 
 import distinctipy
@@ -166,10 +167,10 @@ def main(args):
 
     print("Building json captioning")
     objects_captions = {}
-    for idx in range(len(objects)):
-        objects_captions[idx] = objects[idx]['caption']
+    # for idx in range(len(objects)):
+    #     objects_captions[idx] = objects[idx]['caption']
     
-    objects_captions_json = json.dumps(objects_captions)
+    # objects_captions_json = json.dumps(objects_captions)
 
     cmap = matplotlib.colormaps.get_cmap("turbo")
     
@@ -398,6 +399,64 @@ def main(args):
         else:
             print("Didn't find suitable object")
 
+
+    def color_by_visual_query(vis):
+
+        ref_img_query_path = "/home/liora/Lior/Datasets/svo/office_8_mono/chair.jpg"
+
+        image = Image.open(ref_img_query_path)
+        preprocessed_image = clip_preprocess(image).unsqueeze(0)
+        image_features = clip_model.encode_image(preprocessed_image)
+        image_features /= image_features.norm(dim=-1, keepdim=True)
+
+        objects_clip_fts = objects.get_stacked_values_torch("clip_ft")
+        objects_clip_fts = objects_clip_fts.to("cuda")
+        similarities = F.cosine_similarity(image_features.unsqueeze(0), objects_clip_fts, dim=-1)
+        max_value = similarities.max()
+        min_value = similarities.min()
+        normalized_similarities = (similarities - min_value) / (max_value - min_value)
+        probs = F.softmax(similarities, dim=0)
+        max_prob_idx = torch.argmax(probs)
+        similarity_colors = cmap(normalized_similarities.detach().cpu().numpy())[..., :3]
+
+        max_prob_object = objects[max_prob_idx]
+        print(f"Most probable object is at index {max_prob_idx} with class name '{max_prob_object['class_name']}'")
+        print(f"location xyz: {max_prob_object['bbox'].center}")
+        
+        for i in range(len(objects)):
+            pcd = pcds[i]
+            map_colors = np.asarray(pcd.colors)
+            pcd.colors = o3d.utility.Vector3dVector(
+                np.tile(
+                    [
+                        similarity_colors[i, 0].item(),
+                        similarity_colors[i, 1].item(),
+                        similarity_colors[i, 2].item()
+                    ], 
+                    (len(pcd.points), 1)
+                )
+            )
+        
+        for pcd in pcds:
+            vis.update_geometry(pcd)
+      
+
+        box_annotator = sv.BoxAnnotator(color = ColorPalette.default(),
+                                        text_scale=0.3,
+                                        text_thickness=1,
+                                        text_padding=2,)
+        
+        curr_det = sv.Detections(xyxy=objects[max_prob_object]['xyxy'][0][None, ...])
+        
+        img = Image.open(objects[max_prob_object]['color_path'][0])
+
+        annotated_image = box_annotator.annotate(scene=img, detections=curr_det)
+
+        fig = make_subplots(rows=1, cols=2, subplot_titles=['refernce', 'best fit'])
+        fig.add_trace(go.Image(z=annotated_image), row=1, col=1)
+        fig.show()
+   
+
             
     def save_view_params(vis):
         param = vis.get_view_control().convert_to_pinhole_camera_parameters()
@@ -412,6 +471,8 @@ def main(args):
     vis.register_key_callback(ord("V"), save_view_params)
     vis.register_key_callback(ord("G"), toggle_scene_graph)
     vis.register_key_callback(ord("L"), color_by_llm_query)
+    vis.register_key_callback(ord("V"), color_by_visual_query)
+
 
     
     # Render the scene
