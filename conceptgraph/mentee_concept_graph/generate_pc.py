@@ -236,5 +236,6 @@ if __name__ == "__main__":
     generate_pointcloud(json_path="/home/liora/Lior/Datasets/svo/office_60fps_skip_8_hloc/transforms.json",
                         image_dir="/home/liora/Lior/Datasets/svo/office_60fps_skip_8_hloc/images",
                         depth_dir="/home/liora/Lior/Datasets/svo/office_60fps_skip_8_hloc/depth",
-                        output_path=Path("/home/liora/Lior/Datasets/svo/office_60fps_skip_8_hloc/pointcloud.pcd"),
-                        scale=2.7461)
+                        output_path=Path("/home/liora/Lior/Datasets/svo/office_60fps_skip_8_hloc/pointcloud2.pcd"),
+                        scale=2.7461,
+                        max_distance=2)

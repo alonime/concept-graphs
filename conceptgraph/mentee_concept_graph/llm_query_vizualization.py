@@ -30,6 +30,7 @@ from plotly.subplots import make_subplots
 import plotly.express as px
 
 import distinctipy
+import open3d
 
 # from conceptgraph.utils.pointclouds import Pointclouds
 from conceptgraph.utils.pointclouds import Pointclouds
@@ -109,9 +110,10 @@ def main(args):
         "Either result_path or rgb_pcd_path must be provided."
 
     if rgb_pcd_path is not None:        
-        pointclouds = Pointclouds.load_pointcloud_from_h5(rgb_pcd_path)
-        global_pcd = pointclouds.open3d(0, include_colors=True)
-        
+        # pointclouds = Pointclouds.load_pointcloud_from_h5(rgb_pcd_path)
+        # global_pcd = pointclouds.open3d(0, include_colors=True)
+        global_pcd = open3d.io.read_point_cloud(rgb_pcd_path)
+
         if result_path is None:
             print("Only visualizing the pointcloud...")
             o3d.visualization.draw_geometries([global_pcd])

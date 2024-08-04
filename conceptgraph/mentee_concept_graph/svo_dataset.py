@@ -170,7 +170,7 @@ class GradSLAMDataset(torch.utils.data.Dataset):
         """
         if scale:
             depth /= 1000.0 
-        depth[depth == -10] = np.nan
+        depth[depth < 0] = np.nan
 
         if not self.clip_depth == 0:
             depth[depth > self.clip_depth] = np.nan
@@ -354,9 +354,13 @@ class SVODataset(GradSLAMDataset):
         poses_data = np.array([frame[1] for frame in poses_sort])
 
         poses = []
+        # P = torch.tensor([[1, 0, 0, 0],
+        #                   [0, -1, 0, 0],
+        #                   [0, 0, -1, 0],
+        #                   [0, 0, 0, 1]]).double()
         P = torch.tensor([[1, 0, 0, 0],
-                          [0, -1, 0, 0],
-                          [0, 0, -1, 0],
+                          [0, 1, 0, 0],
+                          [0, 0, 1, 0],
                           [0, 0, 0, 1]]).double()
         for pose in poses_data:
             _pose = P @ pose @ P.T

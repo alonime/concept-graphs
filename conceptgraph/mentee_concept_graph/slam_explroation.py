@@ -200,7 +200,7 @@ def plotly_map_update_visualization(intermediate_pcs, poses, K, max_points_per_p
             "yanchor": "top",
         }
     ]
-
+/mnt/shared/Datasets/office_60fps_skip_1
     fig = go.Figure()
     frames = [{"data": frame, "name": i} for i, frame in enumerate(data)]
     fig.add_traces(frames[0]["data"])

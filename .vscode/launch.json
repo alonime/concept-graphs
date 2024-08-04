@@ -82,8 +82,9 @@
             "console": "integratedTerminal",
             "args": [
                 "--result_path",
-                "/home/liora/Lior/Datasets/svo/office_60fps_skip_8/exps/reconstruction_stride_2/pcd_final_results.pkl.gz",
-                ],
+                "/home/liora/Lior/Datasets/svo/office_60fps_skip_8_hloc/exps/reconstruction_stride_2/pcd_final_results.pkl.gz",
+                "--rgb_pcd_path",
+                "/home/liora/Lior/Datasets/svo/office_60fps_skip_8_hloc/exps/reconstruction_stride_2/global_pcd.pcd"],
             "justMyCode": false
         },
         {

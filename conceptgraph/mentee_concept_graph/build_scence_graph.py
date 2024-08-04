@@ -12,7 +12,7 @@ import cv2
 import numpy as np
 import torch
 from tqdm import trange
-from open3d.io import read_pinhole_camera_parameters
+import open3d
 import open_clip
 from ultralytics import YOLO, SAM
 import supervision as sv
@@ -85,6 +85,8 @@ from conceptgraph.utils.model_utils import compute_clip_features_batched
 from conceptgraph.mentee_concept_graph.mentee_vlm import image_captioning
 from conceptgraph.mentee_concept_graph.svo_dataset import SVODataset
 
+from conceptgraph.mentee_concept_graph.generate_pc import _get_pixel_grid, _get_pointcloud, _clean_pointcloud
+
 
 # Disable torch gradient computation
 torch.set_grad_enabled(False)
@@ -94,8 +96,8 @@ class SceneGraphConfigs:
 
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
-    dataset_stride: int = 2
-    clip_depth: float = 5.0 #meter
+    dataset_stride: int = 1
+    clip_depth: float = 2.5 #meter
 
     wandb: bool = False
     "Log in wand indecator"
@@ -118,6 +120,8 @@ class SceneGraphConfigs:
     save_detections = True
     load_detections = True
     filter_persons = True
+    resconstruct_scene = True
+    extract_localization_features: Literal['superpoint', None] = None
 
     build_spetial_edges: bool = False
     mask_area_threshold: float = 25   # mask with pixel area less than this will be skipped
@@ -130,9 +134,12 @@ class SceneGraphConfigs:
 
     # point cloud processing
     downsample_voxel_size: float = 0.025
+    downsample_global_voxel_size: float = 0.05
     dbscan_remove_noise: bool = True
     dbscan_eps: float = 0.05
     dbscan_min_points: float = 10
+    pcd_nb_neighbors: int = 25
+    pcd_std_ratio: float = 2.0
 
     phys_bias: float = 0.0
     match_method: Literal["sep_thresh", "sim_sum"] =  "sim_sum"
@@ -188,9 +195,10 @@ class SceneGraph:
 
         self.dataset_config_path = self.configs.dataset_root / self.configs.scene_id / self.configs.dataset_config
         self.dataset_config = OmegaConf.load(self.dataset_config_path)
+        self.dataset_config['scale'] = self.dataset_config['scale'] if self.dataset_config['scale'] else 1
 
         self.objects, self.map_edges= None, None
-
+        self.global_xyz, self.global_rgb, self.localiztion_features  = None, None, None
 
 
     def init_dataset(self,):
@@ -206,7 +214,8 @@ class SceneGraph:
                                   image_suffix='png',
                                   depth_suffix='npy',
                                   scale_depth=True,
-                                  clip_depth=self.configs.clip_depth
+                                  clip_depth=self.configs.clip_depth,
+                                  depth_floder_name='depth',
                                   )
         # self.dataset = get_dataset(dataconfig=self.configs.dataset_root / self.configs.scene_id / self.configs.dataset_config, #TODO: @lior, refactor to dataset class
         #                            start=0,
@@ -262,10 +271,17 @@ class SceneGraph:
 
 
         results_keys = ["xyxy", "confidence", "class_id", "mask", "classes", "image_crops", 
-                        "image_feats", "text_feats", "detection_class_labels", "labels", "edges", "caption"]
+                        "image_feats", "detection_class_labels", "labels", "edges", "caption"]
 
         
         prev_adjusted_pose = None
+
+        grid = _get_pixel_grid(self.dataset_config, 1)
+        # Collect point cloud data
+        all_xyz = []
+        all_rgb = []
+        all_desc = [] if self.configs.extract_localization_features is not None else None
+
 
         counter = 0
         for frame_idx in trange(len(self.dataset)):
@@ -276,7 +292,7 @@ class SceneGraph:
 
 
             rgb_path = Path(self.dataset.color_paths[frame_idx])
-            rgb_tensor, depth_tensor, intrinsics, *_ = self.dataset[frame_idx]
+            rgb_tensor, depth_tensor, intrinsics, pose = self.dataset[frame_idx]
 
             # Covert to numpy and do some sanity checks
             depth_tensor = depth_tensor[..., 0]
@@ -361,8 +377,6 @@ class SceneGraph:
                     image_crops, image_feats, text_feats = [], [], []
                     
                 
-
-
                 # increment total object detections
                 self.tracker.increment_total_detections(len(curr_det.xyxy))
 
@@ -406,8 +420,34 @@ class SceneGraph:
             unt_pose = unt_pose.cpu().numpy()
 
             # Don't apply any transformation otherwise
+
             adjusted_pose = unt_pose
+            adjusted_pose[0:3, 3] *= self.dataset_config.scale
+
+            # Get pointcloud
+            xyz, rgb, desc = _get_pointcloud(image_rgb, 
+                                             depth_array, 
+                                             adjusted_pose, 
+                                             grid, 
+                                             self.configs.clip_depth, 
+                                             self.configs.extract_localization_features)
+            if desc is None:
+                xyz, rgb = _clean_pointcloud(xyz, 
+                                             rgb, 
+                                             self.configs.downsample_voxel_size, 
+                                             self.configs.pcd_nb_neighbors, 
+                                             self.configs.pcd_std_ratio)
+            else:
+                assert (self.configs.downsample_voxel_size == 0 and self.configs.pcd_nb_neighbors == 0), \
+                    "Point cloud cleaning is not supported with feature extraction"
+
+            # Append
+            all_xyz.append(xyz)
+            all_rgb.append(rgb)
+            if desc is not None:
+                all_desc.append(desc)
             
+
             if self.viz is not None:
                 prev_adjusted_pose = orr_log_camera(intrinsics,
                                                     adjusted_pose,
@@ -603,10 +643,50 @@ class SceneGraph:
                                  "is_final_frame": is_final_frame,})
                 
         # LOOP OVER -----------------------------------------------------
+        self.global_rgb = np.concatenate(all_rgb, 0) / 255.0
+        self.global_xyz = np.concatenate(all_xyz, 0)
+        if all_desc is not None:
+            self.localiztion_features = np.concatenate(all_desc, 0)
 
         # Save the pointcloud
 
     def save_pcd(self,):
+
+        if self.global_rgb is not None and self.global_xyz is not None:
+
+            if self.localiztion_features is not None:
+                desc = np.concatenate(self.localiztion_features, 0)
+            else:
+                desc = None
+
+            # Final cleanup
+            if desc is None:
+                xyz, rgb = _clean_pointcloud(self.global_xyz,
+                                            self.global_rgb, 
+                                            self.configs.downsample_voxel_size,
+                                            self.configs.pcd_nb_neighbors, 
+                                            self.configs.pcd_std_ratio)
+            else:
+                assert self.configs.downsample_voxel_size == 0 and self.configs.pcd_nb_neighbors == 0, \
+                    "Point cloud cleaning is not supported with feature extraction"
+
+            # Create point cloud
+            pc = open3d.geometry.PointCloud()
+            pc.points = open3d.utility.Vector3dVector(xyz)
+            pc.colors = open3d.utility.Vector3dVector(rgb)
+            print(f"Created pointcloud with {len(pc.points)} points")
+
+            # Save point cloud
+            open3d.io.write_point_cloud(str(self.results_dir / "global_pcd.pcd"), pc)
+            print(f"Pointcloud saved to: {self.results_dir}/global_pcd.pcd")
+            # with open(str(output_info_path), 'wt') as file:
+            #     json.dump(arg_dict, file, indent=2)
+
+            if desc is not None:
+                features_output_path = self.results_dir / "localization_features.npy"
+                print(f"Features saved to: {features_output_path}")
+                np.save(str(features_output_path), desc)
+                
 
         save_pointcloud(exp_suffix="final_results",
                         exp_out_path=self.results_dir,
