@@ -12,7 +12,7 @@ def compute_blur_score(image_path):
 
 
 
-transform_path = "/home/liora/Lior/Datasets/svo/office_60fps_skip_8/transforms.json"
+transform_path = "/home/liora/Lior/Datasets/svo/global_5_skip_8/transforms.json"
 transform_info = OmegaConf.load(transform_path)
 
 

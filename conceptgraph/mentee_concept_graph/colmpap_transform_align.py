@@ -15,10 +15,8 @@ def get_pca(cov):
 
 
 
-
-
-transform_path = "/home/liora/Lior/Datasets/svo/office_60fps_skip_8/transforms.json"
-transform_hloc_path = "/home/liora/Lior/Datasets/svo/office_60fps_skip_8_hloc/transforms.json"
+transform_path = "/home/liora/Lior/Datasets/svo/global_4_skip_8/transforms.json"
+transform_hloc_path = "/home/liora/Lior/Datasets/svo/global_4_skip_8_hloc/transforms.json"
 
 transform_info = OmegaConf.load(transform_path)
 transform_hloc = OmegaConf.load(transform_hloc_path)
