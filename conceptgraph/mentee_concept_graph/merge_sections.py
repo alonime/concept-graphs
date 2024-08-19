@@ -5,6 +5,10 @@ import numpy as np
 from PIL import Image
 import cv2
 from pathlib import Path
+import pycolmap
+import h5py
+import matplotlib.pyplot as plt
+from scipy.spatial.transform import Rotation as R
 
 from hloc import (
     extract_features,
@@ -17,8 +21,104 @@ from hloc import (
 from hloc.visualization import plot_images, read_image
 
 
-import matplotlib
-matplotlib.use('TkAgg')
+# import matplotlib
+# matplotlib.use('TkAgg')
+
+def get_pc(camera_params, depth):
+    intrinsic = np.asarray([[camera_params['params'][0], 0, camera_params['params'][2]], [0, camera_params['params'][1], camera_params['params'][3]], [0, 0, 1]])
+    intrinsic_inv = np.linalg.inv(intrinsic)
+
+    width = camera_params['width']
+    height = camera_params['height']
+
+    grid = np.stack(
+        np.meshgrid(
+            np.arange(width, dtype=np.float32) + 0.5,  # middle of the pixel
+            np.arange(height, dtype=np.float32) + 0.5,  # middle of the pixel
+            np.ones(1, dtype=np.float32),
+        ),
+        -1,
+    ).reshape(-1, 3)
+    cam_grid = np.matmul(intrinsic_inv, grid.T).T
+
+
+def load_depth(path, clip_detstance=3):
+    depth = np.load(path) / 1000
+    depth[depth < 0] = np.nan
+
+    if not clip_detstance == 0:
+        depth[depth > clip_detstance] = np.nan
+
+    return depth
+
+
+def load_features(feature_path, image_name):
+    """Load features for a specific image from the feature file."""
+    with h5py.File(feature_path, 'r') as f:
+        keypoints = f[image_name]['keypoints'].__array__()
+        descriptors = f[image_name]['descriptors'].__array__()
+    return keypoints, descriptors
+
+def load_matches(matches_path, image1_name, image2_name):
+    """Load matches between two images from the match file."""
+    with h5py.File(matches_path, 'r') as f:
+        matches = f[f"{image1_name}/{image2_name}"]['matches0'].__array__()
+    return matches
+
+def estimate_pose(keypoints1, keypoints2, matches, camera_params, plot_debug=False):
+    """Estimate the relative pose between two images."""
+    # Select matched keypoints
+    ref_idx = np.where(matches != -1)[0]
+    matched_keypoints1 = keypoints1[ref_idx, :]
+    matched_keypoints2 = keypoints2[matches[ref_idx]]
+
+    if plot_debug:
+        img1 = cv2.imread(output_perent / "tmp/ref.png")  # Query image
+        img2 = cv2.imread(output_perent / "tmp/target.png")   
+        concatenated_img = np.hstack((img1, img2))
+        fig = plt.figure()
+        plt.imshow(concatenated_img)
+        offset = img1.shape[1]  # Width of the first image
+
+        points2_offset = matched_keypoints2 + np.array([offset, 0])
+
+        # Plot the matching points
+        for (pt1, pt2) in zip(matched_keypoints1[200:210,:], points2_offset[200:210,:]):
+            plt.plot([pt1[0], pt2[0]], [pt1[1], pt2[1]], color='yellow', marker='o', markersize=5, linestyle='-', linewidth=1)
+        plt.axis('off')
+        plt.show()
+
+
+    # Use COLMAP's essential matrix estimation
+    results = pycolmap.essential_matrix_estimation(matched_keypoints1, matched_keypoints2, camera_params, camera_params)
+
+    assert not results == None, "estimation failed"
+
+    r = R.from_quat(results['cam2_from_cam1'].rotation.quat).as_matrix()
+    t = results['cam2_from_cam1'].translation
+    inliers = results['inliers']
+    
+    return r, t, inliers
+
+
+def scale_transition_between_sections(kp1, kp2, depth1, depth2, t, inliers, matches_pairmatchess_idx, camera_param):
+    ref_idx = np.where(matches_pairmatchess_idx != -1)[0]
+    matched_keypoints1 = keypoints1[ref_idx, :]
+    matched_keypoints2 = keypoints2[matches_pairmatchess_idx[ref_idx]]
+    matched_keypoints1 = matched_keypoints1[inliers].astype(np.int64)
+    matched_keypoints2 = matched_keypoints2[inliers].astype(np.int64)
+    kp1_depth = depth1[matched_keypoints1[:, 1], matched_keypoints1[:, 0]]
+    kp2_depth = depth2[matched_keypoints2[:, 1], matched_keypoints2[:, 0]]
+
+    valid_points = np.all(np.vstack([kp1_depth != np.nan, kp2_depth != np.nan]), axis=0)
+
+
+
+
+    pass
+    
+
+
 
 output_perent = Path("/home/liora/Lior/Datasets/svo/global/reconstruction")
 merge_path = Path("/home/liora/Lior/Datasets/svo/global/merge")
@@ -92,18 +192,22 @@ matcher_conf = match_features.confs['disk+lightglue']
 # feature_conf = extract_features.confs['superpoint_inloc']
 # matcher_conf = match_features.confs['superglue']
 
+outputs = output_perent / "tmp"
+images = outputs / "images"
+depth =  outputs / "depth"
 
-new_image_name = f"images/{section_counter}_" + frame.file_path.split("/")[1]
-new_depth_name = f"depth/{section_counter}_" + frame.depth_file_path.split("/")[1]
-frame.depth_file_path = frame.depth_file_path.replace("depth_neural_plus_meter","depth")
+shutil.rmtree(outputs)
 
-shutil.copy(base_dir / sec / loc[-1][0], output_perent / "tmp/ref.png")
-shutil.copy(base_dir / sections_dirs[1] / second_section.frames[0].file_path, output_perent / "tmp/target.png")
-
+outputs.mkdir(parents=True, exist_ok=True)
+images.mkdir(parents=True, exist_ok=True)
+depth.mkdir(parents=True, exist_ok=True)
 
 
-images = output_perent / "tmp"
-outputs = output_perent
+shutil.copy(base_dir / sec / transform_info.frames[-1]['file_path'], images / "ref.png")
+shutil.copy(base_dir / sec / transform_info.frames[-1]['depth_file_path'].replace("depth_neural_plus_meter","depth"), depth / "ref.npy")
+shutil.copy(base_dir / sections_dirs[1] / second_section.frames[0].file_path,images / "target.png")
+shutil.copy(base_dir / sec / second_section.frames[0]['depth_file_path'].replace("depth_neural_plus_meter","depth"), depth / "target.npy")
+
 
 sfm_pairs = outputs / 'pairs-sfm.txt'
 loc_pairs = outputs / 'pairs-loc.txt'
@@ -112,78 +216,16 @@ features = outputs / 'features.h5'
 matches = outputs / 'matches.h5'
 
 references = [str(p.relative_to(images)) for p in (images).iterdir()]
+depths_path = [depth / "ref.npy", depth / "target.npy"]
 
 extract_features.main(feature_conf, images, image_list=references, feature_path=features)
 pairs_from_exhaustive.main(sfm_pairs, image_list=references)
 match_features.main(matcher_conf, sfm_pairs, features=features, matches=matches)
 
-feature_path = extract_features.main(feature_conf, images, outputs)
-match_path = match_features.main(
-    matcher_conf, sfm_pairs, feature_conf["output"], outputs
-)
-
-model = reconstruction.main(sfm_dir, images, sfm_pairs, feature_path, match_path)
-
-
-# features = extract_features.main(feature_conf, 
-#                                   output_perent / "tmp",
-#                                   output_perent)
-# matches = match_features.main(matcher_conf, output_perent / "tmp",  feature_conf["output"], output_perent)
-
-import pycolmap
-import h5py
-
-
-def load_features(feature_path, image_name):
-    """Load features for a specific image from the feature file."""
-    with h5py.File(feature_path, 'r') as f:
-        keypoints = f[image_name]['keypoints'].__array__()
-        descriptors = f[image_name]['descriptors'].__array__()
-    return keypoints, descriptors
-
-def load_matches(matches_path, image1_name, image2_name):
-    """Load matches between two images from the match file."""
-    with h5py.File(matches_path, 'r') as f:
-        matches = f[f"{image1_name}/{image2_name}"]['matches0'].__array__()
-    return matches
-def estimate_pose(keypoints1, keypoints2, matches, camera_params):
-    """Estimate the relative pose between two images."""
-    # Select matched keypoints
-    ref_idx = np.where(matches != -1)[0]
-    matched_keypoints1 = keypoints1[ref_idx, :]
-    matched_keypoints2 = keypoints2[matches[ref_idx]]
-
-
-    import matplotlib.pyplot as plt
-    img1 = cv2.imread(output_perent / "tmp/ref.png")  # Query image
-    img2 = cv2.imread(output_perent / "tmp/target.png")   
-    concatenated_img = np.hstack((img1, img2))
-    fig = plt.figure()
-    plt.imshow(concatenated_img)
-    offset = img1.shape[1]  # Width of the first image
-
-    points2_offset = matched_keypoints2 + np.array([offset, 0])
-
-    # Plot the matching points
-    for (pt1, pt2) in zip(matched_keypoints1[200:210,:], points2_offset[200:210,:]):
-        plt.plot([pt1[0], pt2[0]], [pt1[1], pt2[1]], color='yellow', marker='o', markersize=5, linestyle='-', linewidth=1)
-    plt.axis('off')
-    plt.show()
-
-
-
-    # Use COLMAP's essential matrix estimation
-    estimator = pycolmap.essential_matrix_estimation(matched_keypoints1, matched_keypoints2, camera_params, camera_params)
-
-    success, inliers, E, R, t = estimator.estimate(
-        matched_keypoints1, matched_keypoints2)
-    
-    if success:
-        print("Pose estimation successful")
-        return R, t, inliers
-    else:
-        print("Pose estimation failed")
-        return None, None, None
+# feature_path = extract_features.main(feature_conf, images, outputs)
+# match_path = match_features.main(
+#     matcher_conf, sfm_pairs, feature_conf["output"], outputs
+# )
 
 
 # Load features
@@ -191,7 +233,7 @@ keypoints1, descriptors1 = load_features(features, references[0])
 keypoints2, descriptors2 = load_features(features, references[1])
 
 # Load matches
-matches_pairs_idx = load_matches(matches, references[1], references[2])
+matches_pairs_idx = load_matches(matches, references[0], references[1])
 
 # Estimate pose
 camera_params = {
@@ -200,7 +242,20 @@ camera_params = {
         'height': second_section.h,
         'params': np.array([second_section.fl_x, second_section.fl_y, second_section.cx, second_section.cy])  # Focal lengths and principal point
     }
-R, t, inliers = estimate_pose(keypoints1, keypoints2, matches_pairs_idx, camera_params)
+r, t, inliers = estimate_pose(keypoints1, keypoints2, matches_pairs_idx, camera_params)
+
+
+depth_ref = load_depth(depths_path[0])
+depth_target = load_depth(depths_path[1])
+
+scale_transition_between_sections(keypoints1, 
+                                  keypoints2, 
+                                  depth_ref, 
+                                  depth_target, 
+                                  t, 
+                                  inliers, 
+                                  matches_pairs_idx, 
+                                  camera_params)
 
 
 
