@@ -4,6 +4,7 @@ import shutil
 import numpy as np
 from PIL import Image
 import cv2
+import open3d
 from pathlib import Path
 import pycolmap
 import h5py
@@ -20,12 +21,81 @@ from hloc import (
 )
 from hloc.visualization import plot_images, read_image
 
+from sklearn.linear_model import RANSACRegressor
+from sklearn.linear_model import LinearRegression
 
-# import matplotlib
-# matplotlib.use('TkAgg')
 
-def get_pc(camera_params, depth):
-    intrinsic = np.asarray([[camera_params['params'][0], 0, camera_params['params'][2]], [0, camera_params['params'][1], camera_params['params'][3]], [0, 0, 1]])
+import matplotlib
+matplotlib.use('TkAgg')
+
+
+def estimate_rigid_transformation_ransac(P1, P2, min_samples=100, residual_threshold=0.01, max_trials=100):
+    best_inliers = 0
+    best_translation = None
+    best_rotation = None
+
+    n_points = P1.shape[0]
+
+    for _ in range(max_trials):
+        # Step 1: Randomly sample a subset of points
+        sample_indices = np.random.choice(n_points, min_samples, replace=False)
+        P1_sample = P1[sample_indices]
+        P2_sample = P2[sample_indices]
+        
+        # Step 2: Estimate the transformation (rotation and translation) using SVD
+        translation, rotation = estimate_rigid_transformation(P1_sample, P2_sample)
+        
+        # Step 3: Apply the transformation to the full point set
+        P1_transformed = (rotation @ P1.T).T + translation
+        
+        # Step 4: Calculate distances and count inliers
+        distances = np.linalg.norm(P1_transformed - P2, axis=1)
+        inliers = np.sum(distances < residual_threshold)
+        
+        # Step 5: Update the best model if current model has more inliers
+        if inliers > best_inliers:
+            best_inliers = inliers
+            best_translation = translation
+            best_rotation = rotation
+    
+    return best_translation, best_rotation
+
+def estimate_rigid_transformation(P1, P2):
+    """
+    Estimate the rigid transformation (rotation and translation) between two sets of corresponding 3D points
+    using the SVD approach.
+    """
+    # Step 1: Compute the centroids of each point set
+    centroid_P1 = np.mean(P1, axis=0)
+    centroid_P2 = np.mean(P2, axis=0)
+    
+    # Step 2: Center the points by subtracting the centroids
+    P1_centered = P1 - centroid_P1
+    P2_centered = P2 - centroid_P2
+    
+    # Step 3: Compute the covariance matrix
+    H = P1_centered.T @ P2_centered
+    
+    # Step 4: Compute the Singular Value Decomposition (SVD)
+    U, S, Vt = np.linalg.svd(H)
+    
+    # Step 5: Compute the rotation matrix
+    rotation = Vt.T @ U.T
+    
+    # Ensure a proper rotation matrix (det = 1)
+    if np.linalg.det(rotation) < 0:
+        Vt[-1, :] *= -1
+        rotation = Vt.T @ U.T
+    
+    # Step 6: Compute the translation vector
+    translation = centroid_P2 - rotation @ centroid_P1
+    
+    return translation, rotation
+
+def get_pc(camera_params, depth, rot=None, t=None):
+    intrinsic = np.asarray([[camera_params['params'][0], 0, camera_params['params'][2]], 
+                            [0, camera_params['params'][1], camera_params['params'][3]], 
+                            [0, 0, 1]])
     intrinsic_inv = np.linalg.inv(intrinsic)
 
     width = camera_params['width']
@@ -41,8 +111,15 @@ def get_pc(camera_params, depth):
     ).reshape(-1, 3)
     cam_grid = np.matmul(intrinsic_inv, grid.T).T
 
+    cam_pc = cam_grid * depth.reshape(-1, 1)
+    cam_pc.reshape(height, width, -1)
+    if rot is not None and t is not None:
+        cam_pc = np.matmul(cam_pc, rot.T) + t
 
-def load_depth(path, clip_detstance=3):
+    return cam_pc.reshape(height, width, -1)
+
+
+def load_depth(path, clip_detstance=2.5):
     depth = np.load(path) / 1000
     depth[depth < 0] = np.nan
 
@@ -101,21 +178,68 @@ def estimate_pose(keypoints1, keypoints2, matches, camera_params, plot_debug=Fal
     return r, t, inliers
 
 
-def scale_transition_between_sections(kp1, kp2, depth1, depth2, t, inliers, matches_pairmatchess_idx, camera_param):
+def scale_transition_between_sections(kp1, kp2, 
+                                      image1, image2,
+                                      depth1, depth2, 
+                                      t,
+                                      r,
+                                      inliers,
+                                      matches_pairmatchess_idx, 
+                                      camera_params,
+                                      debug_plot=False):
+    
     ref_idx = np.where(matches_pairmatchess_idx != -1)[0]
-    matched_keypoints1 = keypoints1[ref_idx, :]
-    matched_keypoints2 = keypoints2[matches_pairmatchess_idx[ref_idx]]
+    matched_keypoints1 = kp1[ref_idx, :]
+    matched_keypoints2 = kp2[matches_pairmatchess_idx[ref_idx]]
     matched_keypoints1 = matched_keypoints1[inliers].astype(np.int64)
     matched_keypoints2 = matched_keypoints2[inliers].astype(np.int64)
-    kp1_depth = depth1[matched_keypoints1[:, 1], matched_keypoints1[:, 0]]
-    kp2_depth = depth2[matched_keypoints2[:, 1], matched_keypoints2[:, 0]]
 
-    valid_points = np.all(np.vstack([kp1_depth != np.nan, kp2_depth != np.nan]), axis=0)
+    pc1 = get_pc(camera_params, depth1)
+    pc2 = get_pc(camera_params, depth2, rot=r, t=t)
+    
+    kp1_pos = pc1[matched_keypoints1[:, 1], matched_keypoints1[:, 0]]
+    kp2_pos = pc2[matched_keypoints2[:, 1], matched_keypoints2[:, 0]]
+    valid_points = np.vstack([(~np.isnan(kp1_pos)).all(axis=1), (~np.isnan(kp2_pos)).all(axis=1)]).all(axis=0)
+    kp1_pos = kp1_pos[valid_points, :]
+    kp2_pos = kp2_pos[valid_points, :]
+
+    # Option 1
+    translation, rotation = estimate_rigid_transformation_ransac(kp1_pos, kp2_pos)
+    
+
+    if debug_plot:
+        pc1_clean = pc1.reshape(-1, 3)
+        pc1_valid = ~np.isnan(pc1_clean).any(axis=1)
+        pc1_clean = pc1_clean[pc1_valid, :]
+        pc2_clean = pc2.reshape(-1, 3)
+        pc2_valid = ~np.isnan(pc2_clean).any(axis=1)
+        pc2_clean = np.matmul(pc2_clean[pc2_valid, :], rotation) - translation
+        o3d_pc1 = open3d.geometry.PointCloud()
+        o3d_pc1.points = open3d.utility.Vector3dVector(pc1_clean)
+        o3d_pc1.colors = open3d.utility.Vector3dVector(image1.reshape(-1, 3)[pc1_valid, :] / 255)
+
+        o3d_pc2 = open3d.geometry.PointCloud()
+        o3d_pc2.points = open3d.utility.Vector3dVector(pc2_clean)
+        o3d_pc2.colors = open3d.utility.Vector3dVector(image2.reshape(-1, 3)[pc2_valid, :] / 255)
+
+        visualizer = open3d.visualization.Visualizer()
+        visualizer.create_window()
+
+        visualizer.add_geometry(o3d_pc1)
+        visualizer.add_geometry(o3d_pc2)
+
+        visualizer.run()
+        visualizer.destroy_window()
+
+        fig, axs = plt.subplots(2,2)
+        axs[0,0].imshow(depth1, cmap='viridis')
+        axs[0,1].imshow(image1)
+        axs[1,0].imshow(depth2, cmap='viridis')
+        axs[1,1].imshow(image2)
+        fig.show()
 
 
-
-
-    pass
+    return translation, rotation
     
 
 
@@ -182,7 +306,6 @@ names = [lo[0] for lo in loc]
 
 min_value, max_value = loc_array.min(), loc_array.max()
 
-merge_union_transform = OmegaConf.load(merge_path / merge_dirs[0] / "transforms.json")
 second_section =  OmegaConf.load(base_dir / sections_dirs[1] / "transforms.json")
 
 feature_conf = extract_features.confs['disk']
@@ -206,7 +329,7 @@ depth.mkdir(parents=True, exist_ok=True)
 shutil.copy(base_dir / sec / transform_info.frames[-1]['file_path'], images / "ref.png")
 shutil.copy(base_dir / sec / transform_info.frames[-1]['depth_file_path'].replace("depth_neural_plus_meter","depth"), depth / "ref.npy")
 shutil.copy(base_dir / sections_dirs[1] / second_section.frames[0].file_path,images / "target.png")
-shutil.copy(base_dir / sec / second_section.frames[0]['depth_file_path'].replace("depth_neural_plus_meter","depth"), depth / "target.npy")
+shutil.copy(base_dir / sections_dirs[1] / second_section.frames[0]['depth_file_path'].replace("depth_neural_plus_meter","depth"), depth / "target.npy")
 
 
 sfm_pairs = outputs / 'pairs-sfm.txt'
@@ -244,15 +367,20 @@ camera_params = {
     }
 r, t, inliers = estimate_pose(keypoints1, keypoints2, matches_pairs_idx, camera_params)
 
-
+image_ref =  cv2.imread(str(images / references[0])) 
 depth_ref = load_depth(depths_path[0])
+image_target =  cv2.imread(str(images / references[1])) 
 depth_target = load_depth(depths_path[1])
 
+
 scale_transition_between_sections(keypoints1, 
-                                  keypoints2, 
+                                  keypoints2,
+                                  image_ref,
+                                  image_target,
                                   depth_ref, 
-                                  depth_target, 
+                                  depth_target,
                                   t, 
+                                  r,
                                   inliers, 
                                   matches_pairs_idx, 
                                   camera_params)
