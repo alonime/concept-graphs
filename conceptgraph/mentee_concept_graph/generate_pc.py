@@ -233,9 +233,10 @@ def _clean_pointcloud(xyz, rgb, voxel_size, nb_neighbors, std_ratio):
 
 
 if __name__ == "__main__":
-    generate_pointcloud(json_path="/home/liora/Lior/Datasets/svo/global_6_skip_8_hloc/transforms.json",
-                        image_dir="/home/liora/Lior/Datasets/svo/global_6_skip_8_hloc/images",
-                        depth_dir="/home/liora/Lior/Datasets/svo/global_6_skip_8_hloc/depth",
-                 output_path=Path("/home/liora/Lior/Datasets/svo/global_6_skip_8_hloc/pointcloud.pcd"),
+    base_dir = "/home/liora/Lior/Datasets/svo/global/reconstruction"
+    generate_pointcloud(json_path=f"{base_dir}/transforms.json",
+                        image_dir=f"{base_dir}/images",
+                        depth_dir=f"{base_dir}/depth",
+                        output_path=Path(f"{base_dir}/pointcloud.pcd"),
                         scale=1,
                         max_distance=2)
