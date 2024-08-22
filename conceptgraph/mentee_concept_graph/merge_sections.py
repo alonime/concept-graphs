@@ -24,11 +24,44 @@ from hloc.visualization import plot_images, read_image
 from sklearn.linear_model import RANSACRegressor
 from sklearn.linear_model import LinearRegression
 from tqdm import tqdm
+import copy
 
 import json
 
+from conceptgraph.mentee_concept_graph.generate_pc import generate_pointcloud
+
 import matplotlib
 matplotlib.use('TkAgg')
+
+def draw_registration_result(source, target, transformation):
+    source_temp = copy.deepcopy(source)
+    target_temp = copy.deepcopy(target)
+    source_temp.paint_uniform_color([1, 0.706, 0])
+    target_temp.paint_uniform_color([0, 0.651, 0.929])
+    source_temp.transform(transformation)
+    open3d.visualization.draw_geometries([source_temp, target_temp])
+
+
+def estimate_translation_ransac(P1, P2, min_samples=3, residual_threshold=0.01, max_trials=1000):
+    # Create an empty list to store the translation vectors for each axis (x, y, z)
+    translation_vector = []
+
+    # Fit RANSAC for each axis (x, y, z)
+    for i in range(3):  # Iterate over x, y, z coordinates
+        model = RANSACRegressor(base_estimator=LinearRegression(),
+                                min_samples=min_samples,
+                                residual_threshold=residual_threshold,
+                                max_trials=max_trials)
+        
+        # Fit the model for the i-th coordinate
+        model.fit(P1, P2[:, i])
+        
+        # The translation is given by the intercept of the model
+        translation_vector.append(model.estimator_.intercept_)
+
+    # Combine the translations into a single translation vector
+    return np.array(translation_vector)
+
 
 
 def estimate_rigid_transformation_ransac(P1, P2, min_samples=100, residual_threshold=0.01, max_trials=100):
@@ -207,34 +240,63 @@ def scale_transition_between_sections(kp1, kp2,
 
     # Option 1
     translation, rotation = estimate_rigid_transformation_ransac(kp1_pos, kp2_pos)
-    
 
+    threshold = 0.02
+    trans_init = np.eye(4)
+    trans_init[:3, :3] = r.T @ rotation
+    trans_init[:3, -1] = t - translation
+
+    pc1 = pc1.reshape(-1, 3)
+    pc2 = get_pc(camera_params, depth2).reshape(-1, 3)
+    pc1_valid = ~np.isnan(pc1).any(axis=1)
+    pc1_clean = pc1[pc1_valid, :]
+    open3d_pc1 = open3d.geometry.PointCloud()
+    open3d_pc1.points = open3d.utility.Vector3dVector(pc1_clean)
+    open3d_pc1.colors = open3d.utility.Vector3dVector(image1.reshape(-1, 3)[pc1_valid,:] / 255)
+
+    pc2_valid = ~np.isnan(pc2).any(axis=1)
+    pc2_clean = pc2[pc2_valid, :]
+    open3d_pc2 = open3d.geometry.PointCloud()
+    open3d_pc2.points = open3d.utility.Vector3dVector(pc2_clean)
+    open3d_pc2.colors = open3d.utility.Vector3dVector(image2.reshape(-1, 3)[pc2_valid,:]/ 255)
+
+    open3d_pc1.estimate_normals()
+    open3d_pc2.estimate_normals()
+    reg_p2l = open3d.pipelines.registration.registration_icp(open3d_pc1, open3d_pc2, threshold, trans_init, open3d.pipelines.registration.TransformationEstimationPointToPlane())
+    
+   
     if debug_plot:
+        draw_registration_result(open3d_pc1, open3d_pc2, reg_p2l.transformation)
+
+        pc1 = get_pc(camera_params, depth1)
         pc2 = get_pc(camera_params, depth2)
-        tmp_rotation = r.T @ rotation
+        # tmp_rotation = r.T @ rotation
+        tmp_rotation = reg_p2l.transformation[:3, :3]
         # translation = t - translation
-        tmp_trans = t - translation
+        # tmp_trans = t - translation
+        tmp_trans = reg_p2l.transformation[:3, -1]
+
 
         pc1_clean = pc1.reshape(-1, 3)
         pc1_valid = ~np.isnan(pc1_clean).any(axis=1)
         pc1_clean = pc1_clean[pc1_valid, :]
         pc2_clean = pc2.reshape(-1, 3)
         pc2_valid = ~np.isnan(pc2_clean).any(axis=1)
-        pc2_clean = np.matmul(pc2_clean[pc2_valid, :], tmp_rotation) + tmp_trans
+        pc2_clean = np.matmul(pc2_clean[pc2_valid, :], tmp_rotation) - tmp_trans
 
-        o3d_pc1 = open3d.geometry.PointCloud()
-        o3d_pc1.points = open3d.utility.Vector3dVector(pc1_clean)
-        o3d_pc1.colors = open3d.utility.Vector3dVector(image1.reshape(-1, 3)[pc1_valid, :] / 255)
+        open3d_pc1 = open3d.geometry.PointCloud()
+        open3d_pc1.points = open3d.utility.Vector3dVector(pc1_clean)
+        open3d_pc1.colors = open3d.utility.Vector3dVector(image1.reshape(-1, 3)[pc1_valid, :] / 255)
 
-        o3d_pc2 = open3d.geometry.PointCloud()
-        o3d_pc2.points = open3d.utility.Vector3dVector(pc2_clean)
-        o3d_pc2.colors = open3d.utility.Vector3dVector(image2.reshape(-1, 3)[pc2_valid, :] / 255)
+        open3d_pc2 = open3d.geometry.PointCloud()
+        open3d_pc2.points = open3d.utility.Vector3dVector(pc2_clean)
+        open3d_pc2.colors = open3d.utility.Vector3dVector(image2.reshape(-1, 3)[pc2_valid, :] / 255)
 
         visualizer = open3d.visualization.Visualizer()
         visualizer.create_window()
 
-        visualizer.add_geometry(o3d_pc1)
-        visualizer.add_geometry(o3d_pc2)
+        visualizer.add_geometry(open3d_pc1)
+        visualizer.add_geometry(open3d_pc2)
 
         visualizer.run()
         visualizer.destroy_window()
@@ -247,11 +309,7 @@ def scale_transition_between_sections(kp1, kp2,
         fig.show()
 
 
-    transform = np.eye(4)
-    transform[:3, :3] = r.T @ rotation
-    transform[:3, 3] = t - translation
-
-    return transform
+    return reg_p2l.transformation
     
 
 
@@ -283,6 +341,15 @@ matches = outputs / 'matches.h5'
 
 feature_conf = extract_features.confs['disk'] #['superpoint_inloc']
 matcher_conf = match_features.confs['disk+lightglue'] #['superglue']
+
+try:
+    shutil.rmtree(output_perent)
+except:
+    pass
+output_perent.mkdir(parents=True, exist_ok=True)
+(output_perent / "images").mkdir(parents=True, exist_ok=True)
+(output_perent / "depth").mkdir(parents=True, exist_ok=True)
+
 
 
 
@@ -318,8 +385,9 @@ for sec in tqdm(sections_dirs):
                                     transform_info['cx'], 
                                     transform_info['cy']])}
         
-        carry_transform[:3, 3] = np.asarray(transform_info.frames[0]['transform_matrix'])[:3, 3] * -1
-        carry_transform[:3, :3] = np.linalg.inv(np.asarray(transform_info.frames[0]['transform_matrix'])[:3, :3])
+        # carry_transform[:3, 3] = np.asarray(transform_info.frames[0]['transform_matrix'])[:3, 3] * -1
+        # carry_transform[:3, :3] = np.linalg.inv(np.asarray(transform_info.frames[0]['transform_matrix'])[:3, :3])
+        carry_transform = np.eye(4)
 
         
         initial_frame = False
@@ -359,10 +427,11 @@ for sec in tqdm(sections_dirs):
                                                                  matches_pairs_idx, 
                                                                  camera_params)
         
-        carry_transform[:3, :3] = carry_transform[:3, :3] @ ref_traget_transform[:3, :3]
-        carry_transform[:3, 3] = carry_transform[:3, 3] + ref_traget_transform[:3, 3]
+        carry_transform[:3, :3] =  ref_traget_transform[:3, :3] @ carry_transform[:3, :3]
+        carry_transform[:3, 3] = carry_transform[:3, 3] - ref_traget_transform[:3, 3]
         
     for idx, frame in enumerate(transform_info.frames):
+
         new_image_name = f"images/{section_counter}_" + frame.file_path.split("/")[1]
         new_depth_name = f"depth/{section_counter}_" + frame.depth_file_path.split("/")[1]
         frame.depth_file_path = frame.depth_file_path.replace("depth_neural_plus_meter","depth")
@@ -371,7 +440,15 @@ for sec in tqdm(sections_dirs):
         shutil.copy(base_dir / sec / frame.depth_file_path, output_perent / new_depth_name)
 
         relative_transform = np.asarray(frame.transform_matrix)
-        relative_transform[:3, :3] = relative_transform[:3, :3] @ carry_transform[:3, :3].T
+        if idx == 0:
+            origin_reset_t = np.copy(relative_transform[:3, 3])
+            origin_reset_r = np.copy(relative_transform[:3, :3]).T
+
+        relative_transform[:3, 3] = relative_transform[:3, 3] - origin_reset_t
+        relative_transform[:3, :3] = relative_transform[:3, :3] @ origin_reset_r
+
+
+        relative_transform[:3, :3] = relative_transform[:3, :3] @ carry_transform[:3, :3]
         relative_transform[:3, 3] = relative_transform[:3, 3] + carry_transform[:3, 3]
 
         unifeid_transform['frames'].append({'camera_id':0,
@@ -396,6 +473,13 @@ for sec in tqdm(sections_dirs):
 
 
 json.dump(unifeid_transform, (output_perent / "transforms.json").open("wt"), indent=2)
+generate_pointcloud(json_path=f"{output_perent}/transforms.json",
+                        image_dir=f"{output_perent}/images",
+                        depth_dir=f"{output_perent}/depth",
+                        output_path=Path(f"{output_perent}/pointcloud.pcd"),
+                        scale=1,
+                        max_distance=2)
+
 
 
 
