@@ -5,8 +5,6 @@ from PIL import Image
 import cv2
 
 
-
-
 def compute_blur_score(image_path):
     pass
 

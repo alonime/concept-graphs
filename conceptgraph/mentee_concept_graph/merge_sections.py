@@ -29,9 +29,40 @@ import copy
 import json
 
 from conceptgraph.mentee_concept_graph.generate_pc import generate_pointcloud
+from conceptgraph.mentee_concept_graph.show_pc import show_pointcloud
 
 import matplotlib
 matplotlib.use('TkAgg')
+
+
+def geodesic_distance(R1, R2):
+    """
+    Calculate the geodesic distance (in radians) between two rotation matrices.
+    
+    Parameters:
+    - R1: First rotation matrix (3x3)
+    - R2: Second rotation matrix (3x3)
+    
+    Returns:
+    - Geodesic distance (angle in radians) between the two rotation matrices.
+    """
+    # Ensure the input matrices are numpy arrays
+    R1 = np.array(R1)
+    R2 = np.array(R2)
+    
+    # Compute the rotation matrix that rotates R1 to R2
+    R = np.dot(R1.T, R2)
+    
+    # Compute the trace of the rotation matrix
+    trace_R = np.trace(R)
+    
+    # Calculate the angle using the formula
+    angle = np.arccos((trace_R - 1) / 2)
+    
+    # Ensure the angle is within the valid range of arccos
+    angle = np.clip(angle, 0, np.pi)
+    
+    return angle
 
 def draw_registration_result(source, target, transformation):
     source_temp = copy.deepcopy(source)
@@ -147,14 +178,13 @@ def get_pc(camera_params, depth, rot=None, t=None):
     cam_grid = np.matmul(intrinsic_inv, grid.T).T
 
     cam_pc = cam_grid * depth.reshape(-1, 1)
-    cam_pc.reshape(height, width, -1)
+    cam_pc = cam_pc * [1, -1, -1]  # x: right, y: up, z: backward
     if rot is not None and t is not None:
-        cam_pc = np.matmul(cam_pc, rot.T) + t
-
+        cam_pc = cam_pc @ rot.T + t
     return cam_pc.reshape(height, width, -1)
 
 
-def load_depth(path, clip_detstance=2.5):
+def load_depth(path, clip_detstance=3):
     depth = np.load(path) / 1000
     depth[depth < 0] = np.nan
 
@@ -221,6 +251,7 @@ def scale_transition_between_sections(kp1, kp2,
                                       inliers,
                                       matches_pairmatchess_idx, 
                                       camera_params,
+                                      ref_pose=np.eye(4),
                                       debug_plot=False):
     
     ref_idx = np.where(matches_pairmatchess_idx != -1)[0]
@@ -260,37 +291,69 @@ def scale_transition_between_sections(kp1, kp2,
     open3d_pc2.points = open3d.utility.Vector3dVector(pc2_clean)
     open3d_pc2.colors = open3d.utility.Vector3dVector(image2.reshape(-1, 3)[pc2_valid,:]/ 255)
 
-    open3d_pc1.estimate_normals()
-    open3d_pc2.estimate_normals()
-    reg_p2l = open3d.pipelines.registration.registration_icp(open3d_pc1, open3d_pc2, threshold, trans_init, open3d.pipelines.registration.TransformationEstimationPointToPlane())
+
+    # draw_registration_result(open3d_pc1, open3d_pc1, trans_init)
+    # print("Initial alignment")
+    # evaluation = open3d.pipelines.registration.evaluate_registration(open3d_pc1, open3d_pc2, threshold, trans_init)
+    # print(evaluation)
+
+    reg_p2p = open3d.pipelines.registration.registration_icp(open3d_pc2, open3d_pc1, threshold, trans_init, 
+                                                             open3d.pipelines.registration.TransformationEstimationPointToPoint(),
+                                                             open3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=200))
+    # print(reg_p2p)
+    # print("Transformation is:")
+    # print(reg_p2p.transformation)
+    # draw_registration_result(open3d_pc1, open3d_pc2, reg_p2p.transformation)
+
+
+    # open3d_pc1.estimate_normals()
+    # open3d_pc2.estimate_normals()
+    # reg_p2l = open3d.pipelines.registration.registration_icp(open3d_pc1, open3d_pc2, threshold, trans_init, open3d.pipelines.registration.TransformationEstimationPointToPlane())
+    # print(reg_p2l)
     
+    # np.asanyarray(reg_p2p.correspondence_set)
    
     if debug_plot:
-        draw_registration_result(open3d_pc1, open3d_pc2, reg_p2l.transformation)
+        draw_registration_result(open3d_pc2, open3d_pc1, reg_p2p.transformation)
+        draw_registration_result(open3d_pc2, open3d_pc1, np.eye(4))
 
         pc1 = get_pc(camera_params, depth1)
         pc2 = get_pc(camera_params, depth2)
         # tmp_rotation = r.T @ rotation
-        tmp_rotation = reg_p2l.transformation[:3, :3]
-        # translation = t - translation
+        # ref_rot = np.eye(3)
+        ref_rot = ref_pose[:3, :3]
+        tmp_rotation =  reg_p2p.transformation[:3, :3] @ ref_pose[:3, :3]
+        # tmp_rotation =  reg_p2p.transformation[:3, :3] 
+
+        
         # tmp_trans = t - translation
-        tmp_trans = reg_p2l.transformation[:3, -1]
+        # ref_trans = np.zeros(3)
+        ref_trans = ref_pose[:3, -1]
+        # tmp_trans = reg_p2p.transformation[:3, -1]
+        tmp_trans = ref_pose[:3, -1] + ref_pose[:3, :3] @ reg_p2p.transformation[:3, -1].T
+
+        diist_trans = reg_p2p.transformation[:3, -1]
+        print(f"estimated: {np.linalg.norm(reg_p2p.transformation[:3, -1])} | global: {np.linalg.norm(ref_pose[:3, -1] - tmp_trans)}")
+        geodesic_distance(ref_pose[:3, :3],  tmp_rotation)
+        geodesic_distance(np.eye(3),  reg_p2p.transformation[:3, :3])
+
 
 
         pc1_clean = pc1.reshape(-1, 3)
         pc1_valid = ~np.isnan(pc1_clean).any(axis=1)
-        pc1_clean = pc1_clean[pc1_valid, :]
+        pc1_clean = pc1_clean[pc1_valid, :] @ ref_rot.T + ref_trans
+        
         pc2_clean = pc2.reshape(-1, 3)
         pc2_valid = ~np.isnan(pc2_clean).any(axis=1)
-        pc2_clean = np.matmul(pc2_clean[pc2_valid, :], tmp_rotation) - tmp_trans
+        pc2_clean = pc2_clean[pc2_valid, :] @ tmp_rotation.T + tmp_trans
 
         open3d_pc1 = open3d.geometry.PointCloud()
         open3d_pc1.points = open3d.utility.Vector3dVector(pc1_clean)
-        open3d_pc1.colors = open3d.utility.Vector3dVector(image1.reshape(-1, 3)[pc1_valid, :] / 255)
+        open3d_pc1.colors = open3d.utility.Vector3dVector((image1.reshape(-1, 3)[pc1_valid, :] / 255)[:,[2, 1, 0]])
 
         open3d_pc2 = open3d.geometry.PointCloud()
         open3d_pc2.points = open3d.utility.Vector3dVector(pc2_clean)
-        open3d_pc2.colors = open3d.utility.Vector3dVector(image2.reshape(-1, 3)[pc2_valid, :] / 255)
+        open3d_pc2.colors = open3d.utility.Vector3dVector((image2.reshape(-1, 3)[pc2_valid, :] / 255)[:,[2, 1, 0]])
 
         visualizer = open3d.visualization.Visualizer()
         visualizer.create_window()
@@ -309,8 +372,104 @@ def scale_transition_between_sections(kp1, kp2,
         fig.show()
 
 
-    return reg_p2l.transformation
+    # return reg_p2l.transformation
+    # return trans_init
+    return reg_p2p.transformation
+
+
+def refine_transform(init_transform, 
+                     camera_params,
+                     last_position,
+                     curr_image, curr_depth, 
+                     last_image, last_depth,
+                     max_iter = 200,
+                     debug_plot=False):
     
+    if last_image is None or last_depth is None:
+        print("No last data...")
+        return init_transform
+
+    assert init_transform.shape == (4,4)
+    
+    threshold = 0.02
+
+    pc1 = get_pc(camera_params, last_depth, rot=last_position[:3, :3], t=last_position[:3, -1]).reshape(-1, 3)
+    pc2 = get_pc(camera_params, curr_depth).reshape(-1, 3)
+
+    pc1_valid = ~np.isnan(pc1).any(axis=1)
+    pc1_clean = pc1[pc1_valid, :]
+    open3d_pc1 = open3d.geometry.PointCloud()
+    open3d_pc1.points = open3d.utility.Vector3dVector(pc1_clean)
+    open3d_pc1.colors = open3d.utility.Vector3dVector(curr_image.reshape(-1, 3)[pc1_valid,:] / 255)
+
+    pc2_valid = ~np.isnan(pc2).any(axis=1)
+    pc2_clean = pc2[pc2_valid, :]
+    open3d_pc2 = open3d.geometry.PointCloud()
+    open3d_pc2.points = open3d.utility.Vector3dVector(pc2_clean)
+    open3d_pc2.colors = open3d.utility.Vector3dVector(last_image.reshape(-1, 3)[pc2_valid,:]/ 255)
+
+
+    # draw_registration_result(open3d_pc2, open3d_pc1, np.eye(4))
+    # print("Initial alignment")
+    # evaluation = open3d.pipelines.registration.evaluate_registration(open3d_pc2, open3d_pc1, threshold, init_transform)
+    # print(evaluation)
+
+    reg_p2p = open3d.pipelines.registration.registration_icp(open3d_pc2, open3d_pc1, threshold, init_transform, 
+                                                             open3d.pipelines.registration.TransformationEstimationPointToPoint(),
+                                                             open3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=max_iter))
+    # print(reg_p2p)
+    # print("Transformation is:")
+    # print(reg_p2p.transformation)
+    # draw_registration_result(open3d_pc1, open3d_pc2, reg_p2p.transformation)
+
+
+    # open3d_pc1.estimate_normals()
+    # open3d_pc2.estimate_normals()
+    # reg_p2l = open3d.pipelines.registration.registration_icp(open3d_pc1, open3d_pc2, threshold, trans_init, open3d.pipelines.registration.TransformationEstimationPointToPlane())
+    # print(reg_p2l)
+    mask = np.zeros_like(pc2)
+    mask = np.asanyarray(reg_p2p.correspondence_set)
+   
+    if debug_plot:
+        draw_registration_result(open3d_pc2, open3d_pc1, reg_p2p.transformation)
+
+        pc2_tmp = get_pc(camera_params, curr_depth).reshape(-1, 3)
+        # pc2_tmp = np.copy(pc2)
+
+
+        t_vec =  reg_p2p.transformation[:3, -1]
+        r_mat =  reg_p2p.transformation[:3, :3]
+
+
+        pc1_clean = pc1.reshape(-1, 3)
+        pc1_valid = ~np.isnan(pc1_clean).any(axis=1)
+        pc1_clean = pc1_clean[pc1_valid, :]
+        
+        pc2_clean = pc2_tmp.reshape(-1, 3)
+        pc2_valid = ~np.isnan(pc2_clean).any(axis=1)
+        pc2_clean = pc2_clean[pc2_valid, :] @ r_mat.T + t_vec
+
+        open3d_pc1 = open3d.geometry.PointCloud()
+        open3d_pc1.points = open3d.utility.Vector3dVector(pc1_clean)
+        open3d_pc1.colors = open3d.utility.Vector3dVector((last_image.reshape(-1, 3)[pc1_valid, :] / 255)[:,[2, 1, 0]])
+
+        open3d_pc2 = open3d.geometry.PointCloud()
+        open3d_pc2.points = open3d.utility.Vector3dVector(pc2_clean)
+        open3d_pc2.colors = open3d.utility.Vector3dVector((curr_image.reshape(-1, 3)[pc2_valid, :] / 255)[:,[2, 1, 0]])
+
+        visualizer = open3d.visualization.Visualizer()
+        visualizer.create_window()
+
+        visualizer.add_geometry(open3d_pc1)
+        visualizer.add_geometry(open3d_pc2)
+
+        visualizer.run()
+        visualizer.destroy_window()
+
+    return reg_p2p.transformation
+
+
+
 
 
 
@@ -318,9 +477,9 @@ output_perent = Path("/home/liora/Lior/Datasets/svo/global/reconstruction")
 merge_path = Path("/home/liora/Lior/Datasets/svo/global/merge")
 base_dir = Path("/home/liora/Lior/Datasets/svo/global/records")
 sections_dirs = ["global_1_skip_8", 
-                "global_2_skip_8",]
-                #"global_3_skip_8",
-                # "global_4_skip_8", 
+                "global_2_skip_8",
+                 "global_3_skip_8",]
+                #  "global_4_skip_8",
                 # "global_5_skip_8",
                 # "global_6_skip_8",
                 # "global_7_skip_8", 
@@ -338,6 +497,8 @@ loc_pairs = outputs / 'pairs-loc.txt'
 sfm_dir = outputs / 'sfm'
 features = outputs / 'features.h5'
 matches = outputs / 'matches.h5'
+
+
 
 feature_conf = extract_features.confs['disk'] #['superpoint_inloc']
 matcher_conf = match_features.confs['disk+lightglue'] #['superglue']
@@ -361,6 +522,7 @@ carry_transform = np.eye(4)
 
 section_counter = 1
 
+last_position, last_image, last_depth = None, None, None
 
 for sec in tqdm(sections_dirs):
 
@@ -388,8 +550,6 @@ for sec in tqdm(sections_dirs):
         # carry_transform[:3, 3] = np.asarray(transform_info.frames[0]['transform_matrix'])[:3, 3] * -1
         # carry_transform[:3, :3] = np.linalg.inv(np.asarray(transform_info.frames[0]['transform_matrix'])[:3, :3])
         carry_transform = np.eye(4)
-
-        
         initial_frame = False
 
     else:
@@ -425,12 +585,13 @@ for sec in tqdm(sections_dirs):
                                                                  r,
                                                                  inliers, 
                                                                  matches_pairs_idx, 
-                                                                 camera_params)
+                                                                 camera_params,
+                                                                 ref_pose=carry_transform)
         
+        carry_transform[:3, -1] = carry_transform[:3, -1] + carry_transform[:3, :3] @ ref_traget_transform[:3, -1].T
         carry_transform[:3, :3] =  ref_traget_transform[:3, :3] @ carry_transform[:3, :3]
-        carry_transform[:3, 3] = carry_transform[:3, 3] - ref_traget_transform[:3, 3]
         
-    for idx, frame in enumerate(transform_info.frames):
+    for idx, frame in enumerate(tqdm(transform_info.frames)):
 
         new_image_name = f"images/{section_counter}_" + frame.file_path.split("/")[1]
         new_depth_name = f"depth/{section_counter}_" + frame.depth_file_path.split("/")[1]
@@ -439,25 +600,43 @@ for sec in tqdm(sections_dirs):
         shutil.copy(base_dir / sec / frame.file_path, output_perent / new_image_name)
         shutil.copy(base_dir / sec / frame.depth_file_path, output_perent / new_depth_name)
 
+        curr_image =  cv2.imread(str(output_perent / new_image_name))
+        curr_depth = load_depth(output_perent / new_depth_name)
+
+
         relative_transform = np.asarray(frame.transform_matrix)
         if idx == 0:
-            origin_reset_t = np.copy(relative_transform[:3, 3])
-            origin_reset_r = np.copy(relative_transform[:3, :3]).T
+            origin_reset_t = np.copy(relative_transform[:3, -1])
+            origin_reset_r = np.linalg.inv(np.copy(relative_transform[:3, :3]))
 
-        relative_transform[:3, 3] = relative_transform[:3, 3] - origin_reset_t
-        relative_transform[:3, :3] = relative_transform[:3, :3] @ origin_reset_r
+        relative_transform[:3, 3] = relative_transform[:3, -1] - origin_reset_t
+        relative_transform[:3, :3] =  relative_transform[:3, :3] @ origin_reset_r
 
+        relative_transform[:3, 3] = carry_transform[:3, :3] @ relative_transform[:3, -1] + carry_transform[:3, -1]
+        relative_transform[:3, :3] =  relative_transform[:3, :3] @ carry_transform[:3, :3]
 
-        relative_transform[:3, :3] = relative_transform[:3, :3] @ carry_transform[:3, :3]
-        relative_transform[:3, 3] = relative_transform[:3, 3] + carry_transform[:3, 3]
+        if not sec == sections_dirs[0] and idx != 0:
+            relative_transform = refine_transform(relative_transform, 
+                                             camera_params,
+                                             last_position,
+                                             curr_image,
+                                             curr_depth,
+                                             last_image,
+                                             last_depth,
+                                             max_iter=100)
+            
 
         unifeid_transform['frames'].append({'camera_id':0,
                                             'depth_file_path': new_depth_name,
                                             'file_path': new_image_name,
                                             'transform_matrix': relative_transform.tolist()})
         
+        last_position = relative_transform
+        last_image = curr_image
+        last_depth = curr_depth 
+        
 
-    carry_transform = relative_transform
+    carry_transform = np.copy(relative_transform)
     section_counter += 1
     
     try:
@@ -479,7 +658,7 @@ generate_pointcloud(json_path=f"{output_perent}/transforms.json",
                         output_path=Path(f"{output_perent}/pointcloud.pcd"),
                         scale=1,
                         max_distance=2)
-
+show_pointcloud(output_perent / "pointcloud.pcd")
 
 
 
