@@ -10,6 +10,7 @@ import pycolmap
 import h5py
 import matplotlib.pyplot as plt
 from scipy.spatial.transform import Rotation as R
+import time
 
 from hloc import (
     extract_features,
@@ -158,19 +159,21 @@ def estimate_rigid_transformation(P1, P2):
     
     return translation, rotation
 
-def get_pc(camera_params, depth, rot=None, t=None):
+def get_pc(camera_params, depth, rot=None, t=None, downsample=1):
     intrinsic = np.asarray([[camera_params['params'][0], 0, camera_params['params'][2]], 
                             [0, camera_params['params'][1], camera_params['params'][3]], 
                             [0, 0, 1]])
+    intrinsic[:2] /= downsample
     intrinsic_inv = np.linalg.inv(intrinsic)
 
     width = camera_params['width']
     height = camera_params['height']
 
+
     grid = np.stack(
         np.meshgrid(
-            np.arange(width, dtype=np.float32) + 0.5,  # middle of the pixel
-            np.arange(height, dtype=np.float32) + 0.5,  # middle of the pixel
+            np.arange(width // downsample, dtype=np.float32) + 0.5,  # middle of the pixel
+            np.arange(height // downsample, dtype=np.float32) + 0.5,  # middle of the pixel
             np.ones(1, dtype=np.float32),
         ),
         -1,
@@ -181,7 +184,7 @@ def get_pc(camera_params, depth, rot=None, t=None):
     cam_pc = cam_pc * [1, -1, -1]  # x: right, y: up, z: backward
     if rot is not None and t is not None:
         cam_pc = cam_pc @ rot.T + t
-    return cam_pc.reshape(height, width, -1)
+    return cam_pc.reshape(height // downsample, width // downsample, -1)
 
 
 def load_depth(path, clip_detstance=3):
@@ -382,6 +385,8 @@ def refine_transform(init_transform,
                      last_position,
                      curr_image, curr_depth, 
                      last_image, last_depth,
+                     trailing_pc,
+                     downsample=1,
                      max_iter = 200,
                      debug_plot=False):
     
@@ -393,20 +398,22 @@ def refine_transform(init_transform,
     
     threshold = 0.02
 
-    pc1 = get_pc(camera_params, last_depth, rot=last_position[:3, :3], t=last_position[:3, -1]).reshape(-1, 3)
-    pc2 = get_pc(camera_params, curr_depth).reshape(-1, 3)
+    if trailing_pc is None:
+        pc1 = get_pc(camera_params, last_depth[::downsample, ::downsample], rot=last_position[:3, :3], t=last_position[:3, -1], downsample=downsample).reshape(-1, 3)
+        pc1_valid = ~np.isnan(pc1).any(axis=1)
+        pc1_clean = pc1[pc1_valid, :]
+        open3d_pc1 = open3d.geometry.PointCloud()
+        open3d_pc1.points = open3d.utility.Vector3dVector(pc1_clean)
+        open3d_pc1.colors = open3d.utility.Vector3dVector(last_image[::downsample, ::downsample, ::-1].reshape(-1, 3)[pc1_valid,:] / 255)
+    else:
+        open3d_pc1 = trailing_pc
 
-    pc1_valid = ~np.isnan(pc1).any(axis=1)
-    pc1_clean = pc1[pc1_valid, :]
-    open3d_pc1 = open3d.geometry.PointCloud()
-    open3d_pc1.points = open3d.utility.Vector3dVector(pc1_clean)
-    open3d_pc1.colors = open3d.utility.Vector3dVector(curr_image.reshape(-1, 3)[pc1_valid,:] / 255)
-
+    pc2 = get_pc(camera_params, curr_depth[::downsample, ::downsample], downsample=downsample).reshape(-1, 3)
     pc2_valid = ~np.isnan(pc2).any(axis=1)
     pc2_clean = pc2[pc2_valid, :]
     open3d_pc2 = open3d.geometry.PointCloud()
     open3d_pc2.points = open3d.utility.Vector3dVector(pc2_clean)
-    open3d_pc2.colors = open3d.utility.Vector3dVector(last_image.reshape(-1, 3)[pc2_valid,:]/ 255)
+    open3d_pc2.colors = open3d.utility.Vector3dVector(curr_image[::downsample, ::downsample, ::-1].reshape(-1, 3)[pc2_valid,:]/ 255)
 
 
     # draw_registration_result(open3d_pc2, open3d_pc1, np.eye(4))
@@ -433,7 +440,7 @@ def refine_transform(init_transform,
     if debug_plot:
         draw_registration_result(open3d_pc2, open3d_pc1, reg_p2p.transformation)
 
-        pc2_tmp = get_pc(camera_params, curr_depth).reshape(-1, 3)
+        pc2_tmp = get_pc(camera_params, curr_depth[::downsample, ::downsample], downsample=downsample).reshape(-1, 3)
         # pc2_tmp = np.copy(pc2)
 
 
@@ -441,21 +448,21 @@ def refine_transform(init_transform,
         r_mat =  reg_p2p.transformation[:3, :3]
 
 
-        pc1_clean = pc1.reshape(-1, 3)
-        pc1_valid = ~np.isnan(pc1_clean).any(axis=1)
-        pc1_clean = pc1_clean[pc1_valid, :]
+        # pc1_clean = pc1.reshape(-1, 3)
+        # pc1_valid = ~np.isnan(pc1_clean).any(axis=1)
+        # pc1_clean = pc1_clean[pc1_valid, :]
         
         pc2_clean = pc2_tmp.reshape(-1, 3)
         pc2_valid = ~np.isnan(pc2_clean).any(axis=1)
         pc2_clean = pc2_clean[pc2_valid, :] @ r_mat.T + t_vec
 
-        open3d_pc1 = open3d.geometry.PointCloud()
-        open3d_pc1.points = open3d.utility.Vector3dVector(pc1_clean)
-        open3d_pc1.colors = open3d.utility.Vector3dVector((last_image.reshape(-1, 3)[pc1_valid, :] / 255)[:,[2, 1, 0]])
+        # open3d_pc1 = open3d.geometry.PointCloud()
+        # open3d_pc1.points = open3d.utility.Vector3dVector(pc1_clean)
+        # open3d_pc1.colors = open3d.utility.Vector3dVector((last_image[::downsample, ::downsample, ::-1].reshape(-1, 3)[pc1_valid, :] / 255)[:,[2, 1, 0]])
 
         open3d_pc2 = open3d.geometry.PointCloud()
         open3d_pc2.points = open3d.utility.Vector3dVector(pc2_clean)
-        open3d_pc2.colors = open3d.utility.Vector3dVector((curr_image.reshape(-1, 3)[pc2_valid, :] / 255)[:,[2, 1, 0]])
+        open3d_pc2.colors = open3d.utility.Vector3dVector((curr_image[::downsample, ::downsample, ::-1].reshape(-1, 3)[pc2_valid, :] / 255)[:,[2, 1, 0]])
 
         visualizer = open3d.visualization.Visualizer()
         visualizer.create_window()
@@ -478,15 +485,15 @@ merge_path = Path("/home/liora/Lior/Datasets/svo/global/merge")
 base_dir = Path("/home/liora/Lior/Datasets/svo/global/records")
 sections_dirs = ["global_1_skip_8", 
                 "global_2_skip_8",
-                 "global_3_skip_8",]
-                #  "global_4_skip_8",
-                # "global_5_skip_8",
-                # "global_6_skip_8",
-                # "global_7_skip_8", 
-                # "global_8_skip_8",
-                # "global_9_skip_8",
-                # "global_10_skip_8",
-                # "global_11_skip_8"]
+                 "global_3_skip_8",
+                 "global_4_skip_8",
+                "global_5_skip_8",
+                "global_6_skip_8",
+                "global_7_skip_8", 
+                "global_8_skip_8",
+                "global_9_skip_8",
+                "global_10_skip_8",
+                "global_11_skip_8"]
 
 
 outputs = output_perent / "tmp"
@@ -523,6 +530,13 @@ carry_transform = np.eye(4)
 section_counter = 1
 
 last_position, last_image, last_depth = None, None, None
+
+refine_downsample = 4
+trailing_pc_points = []
+trailing_pc_colors = []
+stack_size = 10
+nb_neighbors = 25 
+std_ratio = 2.0
 
 for sec in tqdm(sections_dirs):
 
@@ -616,24 +630,50 @@ for sec in tqdm(sections_dirs):
         relative_transform[:3, :3] =  relative_transform[:3, :3] @ carry_transform[:3, :3]
 
         if not sec == sections_dirs[0] and idx != 0:
-            relative_transform = refine_transform(relative_transform, 
-                                             camera_params,
-                                             last_position,
-                                             curr_image,
-                                             curr_depth,
-                                             last_image,
-                                             last_depth,
-                                             max_iter=100)
+
+            trailing_pc = open3d.geometry.PointCloud()
+            trailing_pc.points = open3d.utility.Vector3dVector(np.concatenate(trailing_pc_points))
+            trailing_pc.colors = open3d.utility.Vector3dVector(np.concatenate(trailing_pc_colors))
+            trailing_pc, _ = trailing_pc.remove_statistical_outlier(nb_neighbors=nb_neighbors, std_ratio=std_ratio)
+
             
+            relative_transform = refine_transform(relative_transform, 
+                                                  camera_params,
+                                                  last_position,
+                                                  curr_image,
+                                                  curr_depth,
+                                                  last_image,
+                                                  last_depth,
+                                                  trailing_pc,
+                                                  downsample=refine_downsample,
+                                                  max_iter=200)
 
         unifeid_transform['frames'].append({'camera_id':0,
                                             'depth_file_path': new_depth_name,
                                             'file_path': new_image_name,
                                             'transform_matrix': relative_transform.tolist()})
         
+
+        
         last_position = relative_transform
         last_image = curr_image
         last_depth = curr_depth 
+
+
+        if len(trailing_pc_points) >= stack_size:
+            trailing_pc_points.pop(0)
+            trailing_pc_colors.pop(0)
+
+        pc_points= get_pc(camera_params, 
+                          curr_depth[::refine_downsample, ::refine_downsample], 
+                          rot=relative_transform[:3, :3], 
+                          t=relative_transform[:3, -1], 
+                          downsample=refine_downsample).reshape(-1, 3)
+
+        pc_valid = ~np.isnan(pc_points).any(axis=1)
+        trailing_pc_points.append(pc_points[pc_valid, :])
+        trailing_pc_colors.append(curr_image[::refine_downsample, ::refine_downsample, ::-1].reshape(-1, 3)[pc_valid,:] / 255)
+
         
 
     carry_transform = np.copy(relative_transform)
@@ -653,11 +693,12 @@ for sec in tqdm(sections_dirs):
 
 json.dump(unifeid_transform, (output_perent / "transforms.json").open("wt"), indent=2)
 generate_pointcloud(json_path=f"{output_perent}/transforms.json",
-                        image_dir=f"{output_perent}/images",
-                        depth_dir=f"{output_perent}/depth",
-                        output_path=Path(f"{output_perent}/pointcloud.pcd"),
-                        scale=1,
-                        max_distance=2)
+                    image_dir=f"{output_perent}/images",
+                    depth_dir=f"{output_perent}/depth",
+                    output_path=Path(f"{output_perent}/pointcloud.pcd"),
+                    scale=1,
+                    max_distance=2,
+                    downsample = 4)
 show_pointcloud(output_perent / "pointcloud.pcd")
 
 
